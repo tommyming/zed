@@ -4,6 +4,7 @@ pub mod edit_prediction_registry;
 pub(crate) mod mac_only_instance;
 mod migrate;
 mod open_listener;
+mod open_log_view;
 mod open_url_modal;
 mod quick_action_bar;
 pub mod remote_debug;
@@ -21,7 +22,6 @@ use assets::Assets;
 use audio::{AudioSettings, REPLAY_DURATION};
 use breadcrumbs::Breadcrumbs;
 use client::zed_urls;
-use collections::VecDeque;
 use debugger_ui::debugger_panel::DebugPanel;
 use editor::{Editor, MultiBuffer};
 use extension_host::ExtensionStore;
@@ -77,12 +77,13 @@ use std::{
 };
 use terminal_view::terminal_panel::{self, TerminalPanel};
 use theme::{ActiveTheme, GlobalTheme, SystemAppearance, ThemeRegistry, ThemeSettings};
-use ui::{PopoverMenuHandle, prelude::*};
+use ui::{IconName, PopoverMenuHandle, prelude::*};
 use util::markdown::MarkdownString;
 use util::rel_path::RelPath;
 use util::{ResultExt, asset_str, maybe};
 use uuid::Uuid;
 use vim_mode_setting::VimModeSetting;
+
 use workspace::notifications::{
     NotificationId, SuppressEvent, dismiss_app_notification, show_app_notification,
 };
@@ -1275,6 +1276,8 @@ fn initialize_pane(
             toolbar.add_item(dap_log_item, window, cx);
             let acp_tools_item = cx.new(|_| acp_tools::AcpToolsToolbarItemView::new());
             toolbar.add_item(acp_tools_item, window, cx);
+            let open_log_item = cx.new(|cx| open_log_view::OpenLogToolbarItemView::new(window, cx));
+            toolbar.add_item(open_log_item, window, cx);
             let telemetry_log_item =
                 cx.new(|cx| telemetry_log::TelemetryLogToolbarItemView::new(window, cx));
             toolbar.add_item(telemetry_log_item, window, cx);
@@ -1415,113 +1418,16 @@ fn quit(_: &Quit, cx: &mut App) {
 }
 
 fn open_log_file(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-    const MAX_LINES: usize = 1000;
-    let app_state = workspace.app_state();
-    let languages = app_state.languages.clone();
-    let fs = app_state.fs.clone();
-    cx.spawn_in(window, async move |workspace, cx| {
-        let log = {
-            let result = futures::join!(
-                fs.load(&paths::old_log_file()),
-                fs.load(&paths::log_file()),
-                languages.language_for_name("log")
-            );
-            match result {
-                (Err(_), Err(e), _) => Err(e),
-                (old_log, new_log, lang) => {
-                    let mut lines = VecDeque::with_capacity(MAX_LINES);
-                    for line in old_log
-                        .iter()
-                        .flat_map(|log| log.lines())
-                        .chain(new_log.iter().flat_map(|log| log.lines()))
-                    {
-                        if lines.len() == MAX_LINES {
-                            lines.pop_front();
-                        }
-                        lines.push_back(line);
-                    }
-                    Ok((
-                        lines
-                            .into_iter()
-                            .flat_map(|line| [line, "\n"])
-                            .collect::<String>(),
-                        lang.ok(),
-                    ))
-                }
-            }
-        };
+    let log_view =
+        cx.new(|cx| open_log_view::OpenLogView::new(workspace.project().clone(), window, cx));
 
-        let (log, log_language) = match log {
-            Ok((log, log_language)) => (log, log_language),
-            Err(e) => {
-                struct OpenLogError;
-
-                workspace
-                    .update(cx, |workspace, cx| {
-                        workspace.show_notification(
-                            NotificationId::unique::<OpenLogError>(),
-                            cx,
-                            |cx| {
-                                cx.new(|cx| {
-                                    MessageNotification::new(
-                                        format!(
-                                            "Unable to access/open log file at path \
-                                                    {}: {e:#}",
-                                            paths::log_file().display()
-                                        ),
-                                        cx,
-                                    )
-                                })
-                            },
-                        );
-                    })
-                    .ok();
-                return;
-            }
-        };
-        maybe!(async move {
-            let project = workspace
-                .read_with(cx, |workspace, _| workspace.project().clone())
-                .ok()?;
-            let buffer = project
-                .update(cx, |project, cx| {
-                    project.create_buffer(log_language, false, cx)
-                })
-                .await
-                .ok()?;
-            buffer.update(cx, |buffer, cx| {
-                buffer.set_capability(Capability::ReadOnly, cx);
-                buffer.set_text(log, cx);
-            });
-
-            let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx).with_title("Log".into()));
-
-            let editor = cx
-                .new_window_entity(|window, cx| {
-                    let mut editor = Editor::for_multibuffer(buffer, Some(project), window, cx);
-                    editor.set_read_only(true);
-                    editor.set_breadcrumb_header(format!(
-                        "Last {} lines in {}",
-                        MAX_LINES,
-                        paths::log_file().display()
-                    ));
-                    let last_multi_buffer_offset = editor.buffer().read(cx).len(cx);
-                    editor.change_selections(Default::default(), window, cx, |s| {
-                        s.select_ranges(Some(last_multi_buffer_offset..last_multi_buffer_offset));
-                    });
-                    editor
-                })
-                .ok()?;
-
-            workspace
-                .update_in(cx, |workspace, window, cx| {
-                    workspace.add_item_to_active_pane(Box::new(editor), None, true, window, cx);
-                })
-                .ok()
-        })
-        .await;
+    cx.subscribe(&log_view, |workspace, _, event, cx| {
+        let open_log_view::OpenLogEvent::ShowToast(toast) = event;
+        workspace.show_toast(toast.clone(), cx);
     })
     .detach();
+
+    workspace.add_item_to_active_pane(Box::new(log_view), None, true, window, cx);
 }
 
 fn notify_settings_errors(result: settings::SettingsParseResult, is_user: bool, cx: &mut App) {
