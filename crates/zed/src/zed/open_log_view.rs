@@ -22,6 +22,16 @@ use workspace::{
 
 const MAX_LINES: usize = 1000;
 
+// Tail -f semantics: don't render the final line unless it's newline-terminated.
+// This avoids showing partial lines that may be appended to later.
+fn split_terminated_lines(content: &str) -> Vec<String> {
+    let mut lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
+    if !content.ends_with('\n') {
+        let _ = lines.pop();
+    }
+    lines
+}
+
 pub struct OpenLogView {
     focus_handle: FocusHandle,
     lines: VecDeque<SharedString>,
@@ -63,17 +73,11 @@ impl OpenLogView {
 
                     let mut combined_lines = Vec::new();
                     if let Ok(content) = &old_log_result {
-                        combined_lines.extend(content.lines().map(|line| line.to_string()));
+                        combined_lines.extend(split_terminated_lines(content));
                     }
 
-                    let new_lines = new_log
-                        .map(|content| {
-                            content
-                                .lines()
-                                .map(|line| line.to_string())
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
+                    let new_lines: Vec<String> =
+                        new_log.map(split_terminated_lines).unwrap_or_default();
 
                     last_line_count.store(new_lines.len(), Ordering::SeqCst);
 
@@ -105,8 +109,7 @@ impl OpenLogView {
                         }
                     };
 
-                    let new_lines: Vec<String> =
-                        new_content.lines().map(|line| line.to_string()).collect();
+                    let new_lines: Vec<String> = split_terminated_lines(&new_content);
                     let new_line_count = new_lines.len();
                     let last_count = last_line_count.load(Ordering::SeqCst);
 
@@ -391,5 +394,34 @@ impl ToolbarItemView for OpenLogToolbarItemView {
             cx.notify();
         }
         ToolbarItemLocation::Hidden
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_terminated_lines;
+
+    #[test]
+    fn drops_unterminated_final_line() {
+        let content = "a\nb\npartial";
+        let lines = split_terminated_lines(content);
+        assert_eq!(lines, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn keeps_terminated_lines() {
+        let content = "a\nb\nc\n";
+        let lines = split_terminated_lines(content);
+        assert_eq!(
+            lines,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+    }
+
+    #[test]
+    fn empty_when_only_partial() {
+        let content = "partial";
+        let lines = split_terminated_lines(content);
+        assert!(lines.is_empty());
     }
 }
