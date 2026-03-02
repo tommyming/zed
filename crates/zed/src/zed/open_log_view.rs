@@ -7,8 +7,8 @@ use collections::VecDeque;
 use fs::Fs;
 use futures::StreamExt;
 use gpui::{
-    App, Empty, Entity, EventEmitter, FocusHandle, Focusable, ListAlignment, ListState, Task,
-    Window, list, prelude::*, px,
+    App, Empty, Entity, EventEmitter, FocusHandle, Focusable, ListAlignment, ListOffset, ListState,
+    Task, Window, list, prelude::*, px,
 };
 use project::Project;
 use ui::{
@@ -38,6 +38,7 @@ pub struct OpenLogView {
     list_state: ListState,
     search_query: String,
     filtered_indices: Vec<usize>,
+    follow: bool,
     _subscription: Task<()>,
 }
 
@@ -138,6 +139,7 @@ impl OpenLogView {
             list_state,
             search_query: String::new(),
             filtered_indices: Vec::new(),
+            follow: true,
             _subscription: subscription,
         }
     }
@@ -150,6 +152,23 @@ impl OpenLogView {
         )));
     }
 
+    fn scroll_to_bottom(&mut self, cx: &mut Context<Self>) {
+        self.list_state.scroll_to(ListOffset {
+            item_ix: self.filtered_indices.len(),
+            offset_in_item: px(0.),
+        });
+        cx.notify();
+    }
+
+    fn set_follow(&mut self, follow: bool, cx: &mut Context<Self>) {
+        self.follow = follow;
+        if self.follow {
+            self.scroll_to_bottom(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
     fn set_lines(&mut self, lines: impl Iterator<Item = String>, cx: &mut Context<Self>) {
         self.lines.clear();
         for line in lines {
@@ -159,7 +178,11 @@ impl OpenLogView {
             self.lines.push_back(line.into());
         }
         self.recompute_filtered_indices();
-        cx.notify();
+        if self.follow {
+            self.scroll_to_bottom(cx);
+        } else {
+            cx.notify();
+        }
     }
 
     fn append_lines(&mut self, lines: impl Iterator<Item = String>, cx: &mut Context<Self>) {
@@ -170,7 +193,11 @@ impl OpenLogView {
             self.lines.push_back(line.into());
         }
         self.recompute_filtered_indices();
-        cx.notify();
+        if self.follow {
+            self.scroll_to_bottom(cx);
+        } else {
+            cx.notify();
+        }
     }
 
     fn entry_matches_filter(&self, line: &SharedString) -> bool {
@@ -185,6 +212,7 @@ impl OpenLogView {
 
     fn recompute_filtered_indices(&mut self) {
         let previous_count = self.filtered_indices.len();
+        let previous_scroll_top = self.list_state.logical_scroll_top();
         self.filtered_indices.clear();
         for (idx, line) in self.lines.iter().enumerate() {
             if self.entry_matches_filter(line) {
@@ -194,6 +222,9 @@ impl OpenLogView {
         let new_count = self.filtered_indices.len();
         if new_count != previous_count {
             self.list_state.reset(new_count);
+            if !self.follow {
+                self.list_state.scroll_to(previous_scroll_top);
+            }
         } else {
             self.list_state.remeasure();
         }
@@ -202,7 +233,11 @@ impl OpenLogView {
     pub fn set_search_query(&mut self, query: String, cx: &mut Context<Self>) {
         self.search_query = query;
         self.recompute_filtered_indices();
-        cx.notify();
+        if self.follow {
+            self.scroll_to_bottom(cx);
+        } else {
+            cx.notify();
+        }
     }
 
     fn clear_lines(&mut self, cx: &mut Context<Self>) {
@@ -345,11 +380,28 @@ impl Render for OpenLogToolbarItemView {
         };
 
         let log_view_clone = log_view.clone();
+        let follow_log_view = log_view.clone();
         let has_lines = !log_view.read(cx).lines.is_empty();
+        let follow = log_view.read(cx).follow;
 
         h_flex()
             .gap_2()
             .child(div().w(px(200.)).child(self.search_editor.clone()))
+            .child(
+                IconButton::new("follow_log", IconName::ArrowDown)
+                    .icon_size(IconSize::Small)
+                    .tooltip(Tooltip::text(if follow {
+                        "Unfollow Log"
+                    } else {
+                        "Follow Log"
+                    }))
+                    .toggle_state(follow)
+                    .on_click(cx.listener(move |_this, _, _window, cx| {
+                        follow_log_view.update(cx, |log_view, cx| {
+                            log_view.set_follow(!log_view.follow, cx);
+                        });
+                    })),
+            )
             .child(
                 IconButton::new("clear_log", IconName::Trash)
                     .icon_size(IconSize::Small)
