@@ -640,7 +640,8 @@ pub struct GitPanel {
     scroll_handle: UniformListScrollHandle,
     max_width_item_index: Option<usize>,
     selected_entry: Option<usize>,
-    marked_entries: Vec<usize>,
+    selected_entries: HashSet<usize>,
+    selection_anchor: Option<usize>,
     tracked_count: usize,
     tracked_staged_count: usize,
     update_visible_entries_task: Task<()>,
@@ -812,7 +813,8 @@ impl GitPanel {
                 scroll_handle,
                 max_width_item_index: None,
                 selected_entry: None,
-                marked_entries: Vec::new(),
+                selected_entries: HashSet::default(),
+                selection_anchor: None,
                 tracked_count: 0,
                 tracked_staged_count: 0,
                 update_visible_entries_task: Task::ready(()),
@@ -896,7 +898,7 @@ impl GitPanel {
             return;
         };
 
-        self.selected_entry = Some(ix);
+        self.set_single_selected_entry(ix);
         self.scroll_to_selected_entry(cx);
     }
 
@@ -1069,7 +1071,7 @@ impl GitPanel {
         };
 
         if let Some(first_entry) = first_entry {
-            self.selected_entry = Some(first_entry);
+            self.set_single_selected_entry(first_entry);
             self.scroll_to_selected_entry(cx);
         }
     }
@@ -1117,9 +1119,9 @@ impl GitPanel {
         }
 
         if matches!(self.entries.get(new_index), Some(GitListEntry::Header(..))) {
-            self.selected_entry = Some(new_index.saturating_sub(1));
+            self.set_single_selected_entry(new_index.saturating_sub(1));
         } else {
-            self.selected_entry = Some(new_index);
+            self.set_single_selected_entry(new_index);
         }
 
         self.scroll_to_selected_entry(cx);
@@ -1165,9 +1167,9 @@ impl GitPanel {
         };
 
         if matches!(self.entries.get(new_index), Some(GitListEntry::Header(..))) {
-            self.selected_entry = Some(new_index.saturating_add(1));
+            self.set_single_selected_entry(new_index.saturating_add(1));
         } else {
-            self.selected_entry = Some(new_index);
+            self.set_single_selected_entry(new_index);
         }
 
         self.scroll_to_selected_entry(cx);
@@ -1175,7 +1177,7 @@ impl GitPanel {
 
     fn select_last(&mut self, _: &menu::SelectLast, _window: &mut Window, cx: &mut Context<Self>) {
         if self.entries.last().is_some() {
-            self.selected_entry = Some(self.entries.len() - 1);
+            self.set_single_selected_entry(self.entries.len() - 1);
             self.scroll_to_selected_entry(cx);
         }
     }
@@ -1246,6 +1248,118 @@ impl GitPanel {
 
     fn get_selected_entry(&self) -> Option<&GitListEntry> {
         self.selected_entry.and_then(|i| self.entries.get(i))
+    }
+
+    fn set_single_selected_entry(&mut self, index: usize) {
+        self.selected_entry = Some(index);
+        self.selected_entries.clear();
+        self.selected_entries.insert(index);
+        self.selection_anchor = Some(index);
+    }
+
+    fn set_primary_selected_entry(&mut self, index: usize) {
+        self.selected_entry = Some(index);
+        self.selected_entries.insert(index);
+    }
+
+    fn clear_selection(&mut self) {
+        self.selected_entry = None;
+        self.selected_entries.clear();
+        self.selection_anchor = None;
+    }
+
+    fn is_entry_selected(&self, index: usize) -> bool {
+        self.selected_entries.contains(&index)
+    }
+
+    fn is_actionable_status_index(&self, index: usize) -> bool {
+        self.entries
+            .get(index)
+            .and_then(|entry| entry.status_entry())
+            .is_some()
+    }
+
+    fn visible_entry_indices(&self) -> Vec<usize> {
+        match &self.view_mode {
+            GitPanelViewMode::Flat => (0..self.entries.len()).collect(),
+            GitPanelViewMode::Tree(state) => state.logical_indices.clone(),
+        }
+    }
+
+    fn select_range_to(&mut self, index: usize) {
+        let anchor = self
+            .selection_anchor
+            .or(self.selected_entry)
+            .unwrap_or(index);
+        let visible_indices = self.visible_entry_indices();
+        let Some(anchor_visible_ix) = visible_indices.iter().position(|&ix| ix == anchor) else {
+            self.set_single_selected_entry(index);
+            return;
+        };
+        let Some(index_visible_ix) = visible_indices.iter().position(|&ix| ix == index) else {
+            self.set_single_selected_entry(index);
+            return;
+        };
+
+        let (start, end) = if anchor_visible_ix <= index_visible_ix {
+            (anchor_visible_ix, index_visible_ix)
+        } else {
+            (index_visible_ix, anchor_visible_ix)
+        };
+
+        self.selected_entries.clear();
+        self.selected_entry = Some(index);
+        for visible_index in &visible_indices[start..=end] {
+            if self.is_actionable_status_index(*visible_index) {
+                self.selected_entries.insert(*visible_index);
+            }
+        }
+
+        if self.selected_entries.is_empty() {
+            self.selected_entries.insert(index);
+        }
+    }
+
+    fn toggle_entry_selection(&mut self, index: usize) {
+        self.selected_entry = Some(index);
+        self.selection_anchor.get_or_insert(index);
+        if !self.selected_entries.remove(&index) {
+            self.selected_entries.insert(index);
+        }
+        if self.selected_entries.is_empty() {
+            self.selected_entries.insert(index);
+        }
+    }
+
+    fn update_selection_for_click(&mut self, index: usize, modifiers: &Modifiers) {
+        if modifiers.shift {
+            self.select_range_to(index);
+        } else if modifiers.secondary() {
+            self.toggle_entry_selection(index);
+        } else {
+            self.set_single_selected_entry(index);
+        }
+    }
+
+    fn selected_status_entries(&self) -> Vec<GitStatusEntry> {
+        let mut selected_entries = self
+            .selected_entries
+            .iter()
+            .copied()
+            .filter_map(|index| self.entries.get(index))
+            .filter_map(|entry| entry.status_entry().cloned())
+            .collect::<Vec<_>>();
+
+        if selected_entries.is_empty() {
+            if let Some(entry) = self
+                .get_selected_entry()
+                .and_then(|entry| entry.status_entry())
+            {
+                selected_entries.push(entry.clone());
+            }
+        }
+
+        selected_entries
     }
 
     fn open_diff(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
@@ -1367,8 +1481,53 @@ impl GitPanel {
     ) {
         let path_style = self.project.read(cx).path_style(cx);
         maybe!({
-            let list_entry = self.entries.get(self.selected_entry?)?.clone();
-            let entry = list_entry.status_entry()?.to_owned();
+            let entries = self.selected_status_entries();
+            let Some(entry) = entries.first().cloned() else {
+                return Some(());
+            };
+
+            if entries.len() > 1 {
+                let tracked_entries = entries
+                    .into_iter()
+                    .filter(|entry| !entry.status.is_created())
+                    .collect::<Vec<_>>();
+                if tracked_entries.is_empty() {
+                    return Some(());
+                }
+
+                let mut details = tracked_entries
+                    .iter()
+                    .filter_map(|entry| entry.repo_path.as_ref().file_name())
+                    .map(|filename| filename.to_string())
+                    .take(5)
+                    .join("\n");
+                if tracked_entries.len() > 5 {
+                    details.push_str(&format!("\nand {} more…", tracked_entries.len() - 5));
+                }
+
+                let prompt = prompt(
+                    "Discard changes to these files?",
+                    Some(&details),
+                    window,
+                    cx,
+                );
+                let this = cx.weak_entity();
+                window
+                    .spawn(cx, async move |cx| {
+                        if prompt.await? != TrashCancel::Trash {
+                            return anyhow::Ok(());
+                        }
+
+                        this.update_in(cx, |this, window, cx| {
+                            this.perform_checkout(tracked_entries, window, cx);
+                        })?;
+
+                        Ok(())
+                    })
+                    .detach();
+                return Some(());
+            }
+
             let skip_prompt = action.skip_prompt || entry.status.is_created();
 
             let prompt = if skip_prompt {
@@ -2067,6 +2226,21 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let selected_entries = self.selected_status_entries();
+        if selected_entries.len() > 1 {
+            let should_stage = selected_entries.iter().any(|entry| {
+                GitPanel::stage_status_for_entry(
+                    entry,
+                    self.active_repository
+                        .as_ref()
+                        .expect("active repository should exist")
+                        .read(cx),
+                ) != StageStatus::Staged
+            });
+            self.change_file_stage(should_stage, selected_entries, cx);
+            return;
+        }
+
         if let Some(selected_entry) = self.get_selected_entry().cloned() {
             self.toggle_staged_for_entry(&selected_entry, window, cx);
         }
@@ -2080,15 +2254,15 @@ impl GitPanel {
     }
 
     fn stage_selected(&mut self, _: &git::StageFile, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(selected_entry) = self.get_selected_entry() else {
+        let entries = self
+            .selected_status_entries()
+            .into_iter()
+            .filter(|entry| entry.staging != StageStatus::Staged)
+            .collect::<Vec<_>>();
+        if entries.is_empty() {
             return;
-        };
-        let Some(status_entry) = selected_entry.status_entry() else {
-            return;
-        };
-        if status_entry.staging != StageStatus::Staged {
-            self.change_file_stage(true, vec![status_entry.clone()], cx);
         }
+        self.change_file_stage(true, entries, cx);
     }
 
     fn unstage_selected(
@@ -2097,15 +2271,15 @@ impl GitPanel {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(selected_entry) = self.get_selected_entry() else {
+        let entries = self
+            .selected_status_entries()
+            .into_iter()
+            .filter(|entry| entry.staging != StageStatus::Unstaged)
+            .collect::<Vec<_>>();
+        if entries.is_empty() {
             return;
-        };
-        let Some(status_entry) = selected_entry.status_entry() else {
-            return;
-        };
-        if status_entry.staging != StageStatus::Unstaged {
-            self.change_file_stage(false, vec![status_entry.clone()], cx);
         }
+        self.change_file_stage(false, entries, cx);
     }
 
     fn on_commit(&mut self, _: &git::Commit, window: &mut Window, cx: &mut Context<Self>) {
@@ -4928,16 +5102,43 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let selected_entries = if self.is_entry_selected(ix) {
+            self.selected_status_entries()
+        } else {
+            self.set_single_selected_entry(ix);
+            self.selected_status_entries()
+        };
+
         let Some(entry) = self.entries.get(ix).and_then(|e| e.status_entry()) else {
             return;
         };
-        let stage_title = if entry.status.staging().is_fully_staged() {
-            "Unstage File"
+        let has_multiple_entries = selected_entries.len() > 1;
+        let all_created = selected_entries
+            .iter()
+            .all(|entry| entry.status.is_created());
+        let all_staged = selected_entries
+            .iter()
+            .all(|entry| entry.staging == StageStatus::Staged);
+
+        let stage_title = if all_staged {
+            if has_multiple_entries {
+                "Unstage Selected"
+            } else {
+                "Unstage File"
+            }
+        } else if has_multiple_entries {
+            "Stage Selected"
         } else {
             "Stage File"
         };
-        let restore_title = if entry.status.is_created() {
-            "Trash File"
+        let restore_title = if all_created {
+            if has_multiple_entries {
+                "Trash Selected"
+            } else {
+                "Trash File"
+            }
+        } else if has_multiple_entries {
+            "Discard Selected"
         } else {
             "Discard Changes"
         };
@@ -4948,7 +5149,7 @@ impl GitPanel {
                 .action(stage_title, ToggleStaged.boxed_clone())
                 .action(restore_title, git::RestoreFile::default().boxed_clone())
                 .action_disabled_when(
-                    !is_created,
+                    has_multiple_entries || !is_created,
                     "Add to .gitignore",
                     git::AddToGitignore.boxed_clone(),
                 )
@@ -4956,9 +5157,12 @@ impl GitPanel {
                 .action("Open Diff", menu::Confirm.boxed_clone())
                 .action("Open File", menu::SecondaryConfirm.boxed_clone())
                 .separator()
-                .action_disabled_when(is_created, "View File History", Box::new(git::FileHistory))
+                .action_disabled_when(
+                    has_multiple_entries || is_created,
+                    "View File History",
+                    Box::new(git::FileHistory),
+                )
         });
-        self.selected_entry = Some(ix);
         self.set_context_menu(context_menu, position, window, cx);
     }
 
@@ -5024,8 +5228,8 @@ impl GitPanel {
         let git_path_style = ProjectSettings::get_global(cx).git.path_style;
         let display_name = entry.display_name(path_style);
 
-        let selected = self.selected_entry == Some(ix);
-        let marked = self.marked_entries.contains(&ix);
+        let selected = self.is_entry_selected(ix);
+        let marked = false;
         let status_style = GitPanelSettings::get_global(cx).status_style;
         let status = entry.status;
 
@@ -5204,9 +5408,9 @@ impl GitPanel {
             )
             .on_click({
                 cx.listener(move |this, event: &ClickEvent, window, cx| {
-                    this.selected_entry = Some(ix);
+                    this.update_selection_for_click(ix, event.modifiers());
                     cx.notify();
-                    if event.click_count() > 1 || event.modifiers().secondary() {
+                    if event.click_count() > 1 {
                         this.open_file(&Default::default(), window, cx)
                     } else {
                         this.open_diff(&Default::default(), window, cx);
@@ -5242,7 +5446,6 @@ impl GitPanel {
         window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
-        // TODO: Have not yet plugin the self.marked_entries. Not sure when and why we need that
         let selected = self.selected_entry == Some(ix);
         let label_color = Color::Muted;
 
@@ -5363,7 +5566,7 @@ impl GitPanel {
             .on_click({
                 let key = entry.key.clone();
                 cx.listener(move |this, _event: &ClickEvent, window, cx| {
-                    this.selected_entry = Some(ix);
+                    this.set_single_selected_entry(ix);
                     this.toggle_directory(&key, window, cx);
                 })
             })
@@ -6419,6 +6622,42 @@ mod tests {
             editor::init(cx);
             crate::init(cx);
         });
+    }
+
+    fn status_entry_paths(panel: &GitPanel) -> Vec<String> {
+        panel
+            .entries
+            .iter()
+            .filter_map(|entry| entry.status_entry())
+            .map(|entry| {
+                entry
+                    .repo_path
+                    .as_ref()
+                    .as_std_path()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn selected_status_entry_paths(panel: &GitPanel) -> Vec<String> {
+        let mut selected_paths = panel
+            .selected_entries
+            .iter()
+            .copied()
+            .filter_map(|index| panel.entries.get(index))
+            .filter_map(|entry| entry.status_entry())
+            .map(|entry| {
+                entry
+                    .repo_path
+                    .as_ref()
+                    .as_std_path()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        selected_paths.sort();
+        selected_paths
     }
 
     #[test]
@@ -7525,6 +7764,351 @@ mod tests {
                 expected_path.map(|s| s.to_string())
             );
         }
+    }
+
+    #[gpui::test]
+    async fn test_explicit_multi_selection_click_and_range(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            "/root",
+            json!({
+                "project": {
+                    ".git": {},
+                    "src": {
+                        "a.rs": "fn a() {}",
+                        "b.rs": "fn b() {}",
+                        "c.rs": "fn c() {}",
+                        "d.rs": "fn d() {}"
+                    }
+                }
+            }),
+        )
+        .await;
+
+        fs.set_status_for_repo(
+            Path::new(path!("/root/project/.git")),
+            &[
+                ("src/a.rs", StatusCode::Modified.worktree()),
+                ("src/b.rs", StatusCode::Modified.worktree()),
+                ("src/c.rs", StatusCode::Modified.worktree()),
+                ("src/d.rs", StatusCode::Modified.worktree()),
+            ],
+        );
+
+        let project = Project::test(fs.clone(), [Path::new(path!("/root/project"))], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+
+        cx.read(|cx| {
+            project
+                .read(cx)
+                .worktrees(cx)
+                .next()
+                .unwrap()
+                .read(cx)
+                .as_local()
+                .unwrap()
+                .scan_complete()
+        })
+        .await;
+
+        cx.executor().run_until_parked();
+
+        let panel = workspace.update_in(cx, GitPanel::new);
+        let handle = cx.update_window_entity(&panel, |panel, _, _| {
+            std::mem::replace(&mut panel.update_visible_entries_task, Task::ready(()))
+        });
+        cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+        handle.await;
+
+        panel.update(cx, |panel, _cx| {
+            panel.set_single_selected_entry(1);
+            panel.toggle_entry_selection(2);
+            panel.select_range_to(4);
+        });
+
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.selected_entry, Some(4));
+            assert_eq!(panel.selection_anchor, Some(1));
+            assert_eq!(
+                selected_status_entry_paths(panel),
+                vec![
+                    "src/a.rs".to_string(),
+                    "src/b.rs".to_string(),
+                    "src/c.rs".to_string(),
+                    "src/d.rs".to_string(),
+                ]
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_tree_view_shift_range_selects_only_status_entries(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".git": {},
+                "src": {
+                    "a": {
+                        "foo.rs": "fn foo() {}",
+                    },
+                    "b": {
+                        "bar.rs": "fn bar() {}",
+                    },
+                },
+            }),
+        )
+        .await;
+
+        fs.set_status_for_repo(
+            path!("/project/.git").as_ref(),
+            &[
+                ("src/a/foo.rs", StatusCode::Modified.worktree()),
+                ("src/b/bar.rs", StatusCode::Modified.worktree()),
+            ],
+        );
+
+        let project = Project::test(fs.clone(), [Path::new(path!("/project"))], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+
+        cx.read(|cx| {
+            project
+                .read(cx)
+                .worktrees(cx)
+                .next()
+                .unwrap()
+                .read(cx)
+                .as_local()
+                .unwrap()
+                .scan_complete()
+        })
+        .await;
+
+        cx.executor().run_until_parked();
+        cx.update(|_window, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.git_panel.get_or_insert_default().tree_view = Some(true);
+                })
+            });
+        });
+
+        let panel = workspace.update_in(cx, GitPanel::new);
+        let handle = cx.update_window_entity(&panel, |panel, _, _| {
+            std::mem::replace(&mut panel.update_visible_entries_task, Task::ready(()))
+        });
+        cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+        handle.await;
+
+        let visible_paths = panel.read_with(cx, |panel, _| status_entry_paths(panel));
+        assert_eq!(
+            visible_paths,
+            vec!["src/a/foo.rs".to_string(), "src/b/bar.rs".to_string()]
+        );
+
+        let (first_status_index, last_status_index) = panel.read_with(cx, |panel, _| {
+            let status_indices = panel
+                .visible_entry_indices()
+                .into_iter()
+                .filter(|index| panel.is_actionable_status_index(*index))
+                .collect::<Vec<_>>();
+            (
+                *status_indices
+                    .first()
+                    .expect("first status index should exist"),
+                *status_indices
+                    .last()
+                    .expect("last status index should exist"),
+            )
+        });
+
+        panel.update(cx, |panel, _cx| {
+            panel.set_single_selected_entry(first_status_index);
+            panel.select_range_to(last_status_index);
+        });
+
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(
+                selected_status_entry_paths(panel),
+                vec!["src/a/foo.rs".to_string(), "src/b/bar.rs".to_string()]
+            );
+            assert_eq!(panel.selected_entries.len(), 2);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_multi_select_stress_100_files(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.background_executor.clone());
+        let mut files = serde_json::Map::new();
+        files.insert(".git".to_string(), json!({}));
+        let mut src = serde_json::Map::new();
+        for index in 0..100 {
+            src.insert(format!("file_{index:03}.rs"), json!("fn main() {}"));
+        }
+        files.insert("src".to_string(), json!(src));
+
+        fs.insert_tree("/stress", json!({ "project": files })).await;
+
+        let statuses = (0..100)
+            .map(|index| {
+                (
+                    format!("src/file_{index:03}.rs"),
+                    StatusCode::Modified.worktree(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let statuses_ref = statuses
+            .iter()
+            .map(|(path, status)| (path.as_str(), *status))
+            .collect::<Vec<_>>();
+        fs.set_status_for_repo(Path::new(path!("/stress/project/.git")), &statuses_ref);
+
+        let project = Project::test(fs.clone(), [Path::new(path!("/stress/project"))], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+
+        cx.read(|cx| {
+            project
+                .read(cx)
+                .worktrees(cx)
+                .next()
+                .unwrap()
+                .read(cx)
+                .as_local()
+                .unwrap()
+                .scan_complete()
+        })
+        .await;
+
+        cx.executor().run_until_parked();
+
+        let panel = workspace.update_in(cx, GitPanel::new);
+        let handle = cx.update_window_entity(&panel, |panel, _, _| {
+            std::mem::replace(&mut panel.update_visible_entries_task, Task::ready(()))
+        });
+        cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+        handle.await;
+
+        panel.update(cx, |panel, _cx| {
+            let status_indices = panel
+                .entries
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entry)| entry.status_entry().map(|_| index))
+                .collect::<Vec<_>>();
+            let first_index = *status_indices.first().expect("first index should exist");
+            let last_index = *status_indices.last().expect("last index should exist");
+            panel.set_single_selected_entry(first_index);
+            panel.select_range_to(last_index);
+        });
+
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.selected_entries.len(), 100);
+            assert_eq!(selected_status_entry_paths(panel).len(), 100);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_multi_select_stress_1000_files(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.background_executor.clone());
+        let mut files = serde_json::Map::new();
+        files.insert(".git".to_string(), json!({}));
+        let mut src = serde_json::Map::new();
+        for index in 0..1000 {
+            src.insert(format!("file_{index:04}.rs"), json!("fn main() {}"));
+        }
+        files.insert("src".to_string(), json!(src));
+
+        fs.insert_tree("/stress-large", json!({ "project": files }))
+            .await;
+
+        let statuses = (0..1000)
+            .map(|index| {
+                (
+                    format!("src/file_{index:04}.rs"),
+                    StatusCode::Modified.worktree(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let statuses_ref = statuses
+            .iter()
+            .map(|(path, status)| (path.as_str(), *status))
+            .collect::<Vec<_>>();
+        fs.set_status_for_repo(
+            Path::new(path!("/stress-large/project/.git")),
+            &statuses_ref,
+        );
+
+        let project =
+            Project::test(fs.clone(), [Path::new(path!("/stress-large/project"))], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+
+        cx.read(|cx| {
+            project
+                .read(cx)
+                .worktrees(cx)
+                .next()
+                .unwrap()
+                .read(cx)
+                .as_local()
+                .unwrap()
+                .scan_complete()
+        })
+        .await;
+
+        cx.executor().run_until_parked();
+
+        let panel = workspace.update_in(cx, GitPanel::new);
+        let handle = cx.update_window_entity(&panel, |panel, _, _| {
+            std::mem::replace(&mut panel.update_visible_entries_task, Task::ready(()))
+        });
+        cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+        handle.await;
+
+        panel.update(cx, |panel, _cx| {
+            let status_indices = panel
+                .entries
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entry)| entry.status_entry().map(|_| index))
+                .collect::<Vec<_>>();
+            let first_index = *status_indices.first().expect("first index should exist");
+            let last_index = *status_indices.last().expect("last index should exist");
+            panel.set_single_selected_entry(first_index);
+            panel.select_range_to(last_index);
+        });
+
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.selected_entries.len(), 1000);
+            assert_eq!(selected_status_entry_paths(panel).len(), 1000);
+        });
     }
 
     #[test]
