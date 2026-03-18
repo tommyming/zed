@@ -1,14 +1,109 @@
 use gpui::{Action, Hsla, MouseButton, prelude::*, svg};
 use ui::prelude::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinuxWindowControl {
+    Close,
+    Minimize,
+    Maximize,
+}
+
+impl LinuxWindowControl {
+    fn from_layout_token(token: &str) -> Option<Self> {
+        match token.trim() {
+            "close" => Some(Self::Close),
+            "minimize" => Some(Self::Minimize),
+            "maximize" => Some(Self::Maximize),
+            _ => None,
+        }
+    }
+
+    fn element_id(self, index: usize) -> SharedString {
+        match self {
+            Self::Close => format!("close-{index}").into(),
+            Self::Minimize => format!("minimize-{index}").into(),
+            Self::Maximize => format!("maximize-or-restore-{index}").into(),
+        }
+    }
+
+    fn window_control_type(self, window: &Window) -> WindowControlType {
+        match self {
+            Self::Close => WindowControlType::Close,
+            Self::Minimize => WindowControlType::Minimize,
+            Self::Maximize => {
+                if window.is_maximized() {
+                    WindowControlType::Restore
+                } else {
+                    WindowControlType::Maximize
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinuxWindowControlsLayout {
+    pub left: Vec<LinuxWindowControl>,
+    pub right: Vec<LinuxWindowControl>,
+}
+
+impl LinuxWindowControlsLayout {
+    pub fn parse(value: &str) -> Self {
+        let Some((left, right)) = value.split_once(':') else {
+            return Self::default();
+        };
+
+        Self {
+            left: Self::parse_side(left),
+            right: Self::parse_side(right),
+        }
+    }
+
+    fn parse_side(side: &str) -> Vec<LinuxWindowControl> {
+        side.split(',')
+            .filter_map(LinuxWindowControl::from_layout_token)
+            .collect()
+    }
+
+    pub fn with_fallback(value: &str) -> Self {
+        let layout = Self::parse(value);
+        if layout.left.is_empty() && layout.right.is_empty() {
+            Self::default()
+        } else {
+            layout
+        }
+    }
+}
+
+impl Default for LinuxWindowControlsLayout {
+    fn default() -> Self {
+        Self {
+            left: Vec::new(),
+            right: vec![
+                LinuxWindowControl::Minimize,
+                LinuxWindowControl::Maximize,
+                LinuxWindowControl::Close,
+            ],
+        }
+    }
+}
+
 #[derive(IntoElement)]
 pub struct LinuxWindowControls {
+    id: ElementId,
+    controls: Vec<LinuxWindowControl>,
     close_window_action: Box<dyn Action>,
 }
 
 impl LinuxWindowControls {
-    pub fn new(close_window_action: Box<dyn Action>) -> Self {
+    pub fn new(
+        id: impl Into<ElementId>,
+        controls: Vec<LinuxWindowControl>,
+        close_window_action: Box<dyn Action>,
+    ) -> Self {
         Self {
+            id: id.into(),
+            controls,
             close_window_action,
         }
     }
@@ -16,31 +111,27 @@ impl LinuxWindowControls {
 
 impl RenderOnce for LinuxWindowControls {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        h_flex()
-            .id("generic-window-controls")
-            .px_3()
-            .gap_3()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(WindowControl::new(
-                "minimize",
-                WindowControlType::Minimize,
-                cx,
-            ))
-            .child(WindowControl::new(
-                "maximize-or-restore",
-                if window.is_maximized() {
-                    WindowControlType::Restore
-                } else {
-                    WindowControlType::Maximize
-                },
-                cx,
-            ))
-            .child(WindowControl::new_close(
-                "close",
-                WindowControlType::Close,
-                self.close_window_action,
-                cx,
-            ))
+        self.controls.into_iter().enumerate().fold(
+            h_flex()
+                .id(self.id)
+                .px_3()
+                .gap_3()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
+            |controls, (index, control)| {
+                let window_control_type = control.window_control_type(window);
+                let element_id = control.element_id(index);
+
+                match window_control_type {
+                    WindowControlType::Close => controls.child(WindowControl::new_close(
+                        element_id,
+                        window_control_type,
+                        self.close_window_action.boxed_clone(),
+                        cx,
+                    )),
+                    _ => controls.child(WindowControl::new(element_id, window_control_type, cx)),
+                }
+            },
+        )
     }
 }
 
@@ -53,10 +144,6 @@ pub enum WindowControlType {
 }
 
 impl WindowControlType {
-    /// Returns the icon name for the window control type.
-    ///
-    /// Will take a [PlatformStyle] in the future to return a different
-    /// icon name based on the platform.
     pub fn icon(&self) -> IconName {
         match self {
             WindowControlType::Minimize => IconName::GenericMinimize,
@@ -87,29 +174,21 @@ impl WindowControlStyle {
         }
     }
 
-    #[allow(unused)]
-    /// Sets the background color of the control.
     pub fn background(mut self, color: impl Into<Hsla>) -> Self {
         self.background = color.into();
         self
     }
 
-    #[allow(unused)]
-    /// Sets the background color of the control when hovered.
     pub fn background_hover(mut self, color: impl Into<Hsla>) -> Self {
         self.background_hover = color.into();
         self
     }
 
-    #[allow(unused)]
-    /// Sets the color of the icon.
     pub fn icon(mut self, color: impl Into<Hsla>) -> Self {
         self.icon = color.into();
         self
     }
 
-    #[allow(unused)]
-    /// Sets the color of the icon when hovered.
     pub fn icon_hover(mut self, color: impl Into<Hsla>) -> Self {
         self.icon_hover = color.into();
         self
@@ -152,7 +231,6 @@ impl WindowControl {
         }
     }
 
-    #[allow(unused)]
     pub fn custom_style(
         id: impl Into<ElementId>,
         icon: WindowControlType,
@@ -204,5 +282,63 @@ impl RenderOnce for WindowControl {
                     ),
                 }
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LinuxWindowControl, LinuxWindowControlsLayout};
+
+    #[test]
+    fn parses_buttons_on_left_and_right() {
+        let layout = LinuxWindowControlsLayout::parse("close,minimize:maximize");
+
+        assert_eq!(
+            layout,
+            LinuxWindowControlsLayout {
+                left: vec![LinuxWindowControl::Close, LinuxWindowControl::Minimize],
+                right: vec![LinuxWindowControl::Maximize],
+            }
+        );
+    }
+
+    #[test]
+    fn ignores_unknown_tokens() {
+        let layout = LinuxWindowControlsLayout::parse("icon,close:appmenu,minimize,unknown");
+
+        assert_eq!(
+            layout,
+            LinuxWindowControlsLayout {
+                left: vec![LinuxWindowControl::Close],
+                right: vec![LinuxWindowControl::Minimize],
+            }
+        );
+    }
+
+    #[test]
+    fn preserves_empty_layout() {
+        let layout = LinuxWindowControlsLayout::parse(":");
+
+        assert_eq!(
+            layout,
+            LinuxWindowControlsLayout {
+                left: Vec::new(),
+                right: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn falls_back_for_missing_separator() {
+        let layout = LinuxWindowControlsLayout::parse("close,minimize,maximize");
+
+        assert_eq!(layout, LinuxWindowControlsLayout::default());
+    }
+
+    #[test]
+    fn falls_back_for_empty_recognized_layout() {
+        let layout = LinuxWindowControlsLayout::with_fallback("icon:appmenu");
+
+        assert_eq!(layout, LinuxWindowControlsLayout::default());
     }
 }

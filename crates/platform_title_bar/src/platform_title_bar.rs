@@ -2,10 +2,11 @@ mod platforms;
 mod system_window_tabs;
 
 use feature_flags::{AgentV2FeatureFlag, FeatureFlagAppExt};
+use futures::StreamExt;
 use gpui::{
     AnyElement, App, Context, Decorations, Entity, Hsla, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, StatefulInteractiveElement, Styled, Window, WindowControlArea, div,
-    px,
+    MouseButton, ParentElement, StatefulInteractiveElement, Styled, Task, Window,
+    WindowControlArea, div, px,
 };
 use project::DisableAiSettings;
 use settings::Settings;
@@ -15,6 +16,9 @@ use ui::{
     prelude::*,
     utils::{TRAFFIC_LIGHT_PADDING, platform_title_bar_height},
 };
+
+#[cfg(target_os = "linux")]
+use ashpd::desktop::settings::Settings as PortalSettings;
 
 use crate::{
     platforms::{platform_linux, platform_windows},
@@ -33,6 +37,8 @@ pub struct PlatformTitleBar {
     system_window_tabs: Entity<SystemWindowTabs>,
     workspace_sidebar_open: bool,
     sidebar_has_notifications: bool,
+    linux_window_controls_layout: platform_linux::LinuxWindowControlsLayout,
+    _linux_window_controls_task: Option<Task<()>>,
 }
 
 impl PlatformTitleBar {
@@ -40,7 +46,7 @@ impl PlatformTitleBar {
         let platform_style = PlatformStyle::platform();
         let system_window_tabs = cx.new(|_cx| SystemWindowTabs::new());
 
-        Self {
+        let mut this = Self {
             id: id.into(),
             platform_style,
             children: SmallVec::new(),
@@ -48,11 +54,22 @@ impl PlatformTitleBar {
             system_window_tabs,
             workspace_sidebar_open: false,
             sidebar_has_notifications: false,
+            linux_window_controls_layout: platform_linux::LinuxWindowControlsLayout::default(),
+            _linux_window_controls_task: None,
+        };
+
+        #[cfg(target_os = "linux")]
+        if platform_style == PlatformStyle::Linux {
+            this._linux_window_controls_task = Some(
+                cx.spawn(async move |this, cx| observe_linux_window_controls_layout(this, cx)),
+            );
         }
+
+        this
     }
 
     pub fn title_bar_color(&self, window: &mut Window, cx: &mut Context<Self>) -> Hsla {
-        if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+        if cfg!(target_os = "linux") {
             if window.is_window_active() && !self.should_move {
                 cx.theme().colors().title_bar_background
             } else {
@@ -101,6 +118,59 @@ impl PlatformTitleBar {
     }
 }
 
+#[cfg(target_os = "linux")]
+async fn load_linux_window_controls_layout(
+    settings: &PortalSettings,
+) -> platform_linux::LinuxWindowControlsLayout {
+    let value = settings
+        .read::<String>("org.gnome.desktop.wm.preferences", "button-layout")
+        .await;
+    let Ok(value) = value else {
+        return platform_linux::LinuxWindowControlsLayout::default();
+    };
+
+    platform_linux::LinuxWindowControlsLayout::with_fallback(&value)
+}
+
+#[cfg(target_os = "linux")]
+async fn observe_linux_window_controls_layout(
+    this: gpui::WeakEntity<PlatformTitleBar>,
+    cx: &mut gpui::AsyncApp,
+) {
+    let settings = PortalSettings::new().await;
+    let Ok(settings) = settings else {
+        return;
+    };
+
+    let layout = load_linux_window_controls_layout(&settings).await;
+    let _ = this.update(cx, |this, cx| {
+        this.linux_window_controls_layout = layout;
+        cx.notify();
+    });
+
+    let stream = settings
+        .receive_setting_changed_with_args::<String>(
+            "org.gnome.desktop.wm.preferences",
+            "button-layout",
+        )
+        .await;
+    let Ok(mut stream) = stream else {
+        return;
+    };
+
+    while let Some(Ok(value)) = stream.next().await {
+        let layout = platform_linux::LinuxWindowControlsLayout::with_fallback(&value);
+        let result = this.update(cx, |this, cx| {
+            this.linux_window_controls_layout = layout;
+            cx.notify();
+        });
+
+        if result.is_err() {
+            break;
+        }
+    }
+}
+
 impl Render for PlatformTitleBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let supported_controls = window.window_controls();
@@ -109,6 +179,7 @@ impl Render for PlatformTitleBar {
         let titlebar_color = self.title_bar_color(window, cx);
         let close_action = Box::new(workspace::CloseWindow);
         let children = mem::take(&mut self.children);
+        let linux_window_controls_layout = self.linux_window_controls_layout.clone();
 
         let is_multiworkspace_sidebar_open =
             PlatformTitleBar::is_multi_workspace_enabled(cx) && self.is_workspace_sidebar_open();
@@ -187,8 +258,36 @@ impl Render for PlatformTitleBar {
             })
             .bg(titlebar_color)
             .content_stretch()
-            .child(
-                div()
+            .child(match self.platform_style {
+                PlatformStyle::Linux if matches!(decorations, Decorations::Client { .. }) => div()
+                    .id(self.id.clone())
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .overflow_x_hidden()
+                    .w_full()
+                    .child(platform_linux::LinuxWindowControls::new(
+                        "generic-window-controls-left",
+                        linux_window_controls_layout.left.clone(),
+                        close_action.boxed_clone(),
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .overflow_x_hidden()
+                            .flex_1()
+                            .children(children),
+                    )
+                    .child(platform_linux::LinuxWindowControls::new(
+                        "generic-window-controls-right",
+                        linux_window_controls_layout.right.clone(),
+                        close_action,
+                    )),
+                _ => div()
                     .id(self.id.clone())
                     .flex()
                     .flex_row()
@@ -197,20 +296,17 @@ impl Render for PlatformTitleBar {
                     .overflow_x_hidden()
                     .w_full()
                     .children(children),
-            )
+            })
             .when(!window.is_fullscreen(), |title_bar| {
                 match self.platform_style {
                     PlatformStyle::Mac => title_bar,
                     PlatformStyle::Linux => {
                         if matches!(decorations, Decorations::Client { .. }) {
-                            title_bar
-                                .child(platform_linux::LinuxWindowControls::new(close_action))
-                                .when(supported_controls.window_menu, |titlebar| {
-                                    titlebar
-                                        .on_mouse_down(MouseButton::Right, move |ev, window, _| {
-                                            window.show_window_menu(ev.position)
-                                        })
+                            title_bar.when(supported_controls.window_menu, |titlebar| {
+                                titlebar.on_mouse_down(MouseButton::Right, move |ev, window, _| {
+                                    window.show_window_menu(ev.position)
                                 })
+                            })
                         } else {
                             title_bar
                         }

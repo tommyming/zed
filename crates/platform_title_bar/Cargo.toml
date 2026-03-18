@@ -23,5 +23,9 @@ ui.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd.workspace = true
+futures.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
