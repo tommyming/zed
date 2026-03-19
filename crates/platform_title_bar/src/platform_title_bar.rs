@@ -17,6 +17,8 @@ use ui::{
     utils::{TRAFFIC_LIGHT_PADDING, platform_title_bar_height},
 };
 
+// [feat-linux] Linux-only portal access for reading and watching
+// the desktop `button-layout` setting.
 #[cfg(target_os = "linux")]
 use ashpd::desktop::settings::Settings as PortalSettings;
 
@@ -37,7 +39,11 @@ pub struct PlatformTitleBar {
     system_window_tabs: Entity<SystemWindowTabs>,
     workspace_sidebar_open: bool,
     sidebar_has_notifications: bool,
+    // [feat-linux] Cached Linux controls layout used by render(). It starts
+    // with the current default behavior and is updated from the Settings portal.
     linux_window_controls_layout: platform_linux::LinuxWindowControlsLayout,
+    // [feat-linux] Long-lived Linux settings watcher task so runtime changes to
+    // `button-layout` can update the title bar without restarting Zed.
     _linux_window_controls_task: Option<Task<()>>,
 }
 
@@ -58,6 +64,9 @@ impl PlatformTitleBar {
             _linux_window_controls_task: None,
         };
 
+        // [feat-linux] Start Linux portal observation only for the Linux title
+        // bar path. This performs the initial load and then watches live
+        // `button-layout` changes while the app is running.
         #[cfg(target_os = "linux")]
         if platform_style == PlatformStyle::Linux {
             this._linux_window_controls_task = Some(
@@ -118,6 +127,9 @@ impl PlatformTitleBar {
     }
 }
 
+// [feat-linux] One-shot Linux portal read for the current `button-layout`
+// value. Falls back to the existing right-side layout when the setting is
+// unavailable or does not contain recognized controls.
 #[cfg(target_os = "linux")]
 async fn load_linux_window_controls_layout(
     settings: &PortalSettings,
@@ -132,6 +144,9 @@ async fn load_linux_window_controls_layout(
     platform_linux::LinuxWindowControlsLayout::with_fallback(&value)
 }
 
+// [feat-linux] Linux Settings portal watcher. It first loads the current value,
+// then listens for future `button-layout` changes and updates the cached title
+// bar layout so the UI can react live while Zed is running.
 #[cfg(target_os = "linux")]
 async fn observe_linux_window_controls_layout(
     this: gpui::WeakEntity<PlatformTitleBar>,
@@ -179,6 +194,7 @@ impl Render for PlatformTitleBar {
         let titlebar_color = self.title_bar_color(window, cx);
         let close_action = Box::new(workspace::CloseWindow);
         let children = mem::take(&mut self.children);
+        // [feat-linux] Snapshot the cached Linux layout for this render pass.
         let linux_window_controls_layout = self.linux_window_controls_layout.clone();
 
         let is_multiworkspace_sidebar_open =
@@ -259,6 +275,9 @@ impl Render for PlatformTitleBar {
             .bg(titlebar_color)
             .content_stretch()
             .child(match self.platform_style {
+                // [feat-linux] Linux client-side decorations now render controls
+                // on both sides from the parsed system layout, with the normal
+                // title bar content kept in the middle.
                 PlatformStyle::Linux if matches!(decorations, Decorations::Client { .. }) => div()
                     .id(self.id.clone())
                     .flex()

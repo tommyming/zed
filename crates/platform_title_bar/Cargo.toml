@@ -24,7 +24,10 @@ workspace.workspace = true
 zed_actions.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# [feat-linux] Linux-only Settings portal dependency used to read and watch
+# the desktop `button-layout` setting for title bar window controls.
 ashpd.workspace = true
+# [feat-linux] Stream utilities used by the live Linux settings watcher.
 futures.workspace = true
 
 [target.'cfg(windows)'.dependencies]
