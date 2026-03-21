@@ -2,9 +2,8 @@ mod platforms;
 mod system_window_tabs;
 
 use feature_flags::{AgentV2FeatureFlag, FeatureFlagAppExt};
-use futures::StreamExt;
 use gpui::{
-    AnyElement, App, Context, Decorations, Entity, Hsla, InteractiveElement, IntoElement,
+    Action, AnyElement, App, Context, Decorations, Entity, Hsla, InteractiveElement, IntoElement,
     MouseButton, ParentElement, StatefulInteractiveElement, Styled, Task, Window,
     WindowControlArea, div, px,
 };
@@ -21,6 +20,8 @@ use ui::{
 // the desktop `button-layout` setting.
 #[cfg(target_os = "linux")]
 use ashpd::desktop::settings::Settings as PortalSettings;
+#[cfg(target_os = "linux")]
+use futures::StreamExt;
 
 use crate::{
     platforms::{platform_linux, platform_windows},
@@ -52,6 +53,7 @@ impl PlatformTitleBar {
         let platform_style = PlatformStyle::platform();
         let system_window_tabs = cx.new(|_cx| SystemWindowTabs::new());
 
+        #[allow(unused_mut)]
         let mut this = Self {
             id: id.into(),
             platform_style,
@@ -195,7 +197,10 @@ impl Render for PlatformTitleBar {
         let close_action = Box::new(workspace::CloseWindow);
         let children = mem::take(&mut self.children);
         // [feat-linux] Snapshot the cached Linux layout for this render pass.
-        let linux_window_controls_layout = self.linux_window_controls_layout.clone();
+        let platform_linux::LinuxWindowControlsLayout {
+            left: linux_window_controls_left,
+            right: linux_window_controls_right,
+        } = self.linux_window_controls_layout.clone();
 
         let is_multiworkspace_sidebar_open =
             PlatformTitleBar::is_multi_workspace_enabled(cx) && self.is_workspace_sidebar_open();
@@ -288,7 +293,7 @@ impl Render for PlatformTitleBar {
                     .w_full()
                     .child(platform_linux::LinuxWindowControls::new(
                         "generic-window-controls-left",
-                        linux_window_controls_layout.left.clone(),
+                        linux_window_controls_left,
                         close_action.boxed_clone(),
                     ))
                     .child(
@@ -303,7 +308,7 @@ impl Render for PlatformTitleBar {
                     )
                     .child(platform_linux::LinuxWindowControls::new(
                         "generic-window-controls-right",
-                        linux_window_controls_layout.right.clone(),
+                        linux_window_controls_right,
                         close_action,
                     )),
                 _ => div()

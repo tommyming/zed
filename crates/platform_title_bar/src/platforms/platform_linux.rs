@@ -15,6 +15,7 @@ impl LinuxWindowControl {
     // [feat-linux] Parses recognized control tokens from the Linux
     // `button-layout` value. Unknown tokens like `icon` or `appmenu`
     // are ignored on purpose.
+    #[cfg(any(target_os = "linux", test))]
     fn from_layout_token(token: &str) -> Option<Self> {
         match token.trim() {
             "close" => Some(Self::Close),
@@ -65,6 +66,7 @@ impl LinuxWindowControlsLayout {
     // [feat-linux] Parses the full Linux `button-layout` string by splitting
     // it into left/right sides around `:` and then parsing recognized tokens
     // from each side independently.
+    #[cfg(any(target_os = "linux", test))]
     pub fn parse(value: &str) -> Self {
         let Some((left, right)) = value.split_once(':') else {
             return Self::default();
@@ -78,6 +80,7 @@ impl LinuxWindowControlsLayout {
 
     // [feat-linux] Parses one side of the layout and preserves the order of
     // recognized controls while dropping unsupported tokens.
+    #[cfg(any(target_os = "linux", test))]
     fn parse_side(side: &str) -> Vec<LinuxWindowControl> {
         side.split(',')
             .filter_map(LinuxWindowControl::from_layout_token)
@@ -86,6 +89,7 @@ impl LinuxWindowControlsLayout {
 
     // [feat-linux] Applies a safe fallback to the current right-side layout
     // when the parsed value contains no recognized controls.
+    #[cfg(any(target_os = "linux", test))]
     pub fn with_fallback(value: &str) -> Self {
         let layout = Self::parse(value);
         if layout.left.is_empty() && layout.right.is_empty() {
@@ -204,21 +208,25 @@ impl WindowControlStyle {
         }
     }
 
+    #[allow(dead_code)]
     pub fn background(mut self, color: impl Into<Hsla>) -> Self {
         self.background = color.into();
         self
     }
 
+    #[allow(dead_code)]
     pub fn background_hover(mut self, color: impl Into<Hsla>) -> Self {
         self.background_hover = color.into();
         self
     }
 
+    #[allow(dead_code)]
     pub fn icon(mut self, color: impl Into<Hsla>) -> Self {
         self.icon = color.into();
         self
     }
 
+    #[allow(dead_code)]
     pub fn icon_hover(mut self, color: impl Into<Hsla>) -> Self {
         self.icon_hover = color.into();
         self
@@ -261,6 +269,7 @@ impl WindowControl {
         }
     }
 
+    #[allow(dead_code)]
     pub fn custom_style(
         id: impl Into<ElementId>,
         icon: WindowControlType,
