@@ -1,4 +1,4 @@
-use gpui::{Action, Hsla, MouseButton, prelude::*, svg};
+use gpui::{Action, Hsla, MouseButton, WindowControls, prelude::*, svg};
 use ui::prelude::*;
 
 // [feat-linux] Linux-only parsed representation of window controls from
@@ -51,6 +51,14 @@ impl LinuxWindowControl {
             }
         }
     }
+
+    pub fn is_supported(self, supported_controls: WindowControls) -> bool {
+        match self {
+            Self::Close => true,
+            Self::Minimize => supported_controls.minimize,
+            Self::Maximize => supported_controls.maximize,
+        }
+    }
 }
 
 // [feat-linux] Minimal parsed layout for Linux window controls. The system
@@ -67,15 +75,13 @@ impl LinuxWindowControlsLayout {
     // it into left/right sides around `:` and then parsing recognized tokens
     // from each side independently.
     #[cfg(any(target_os = "linux", test))]
-    pub fn parse(value: &str) -> Self {
-        let Some((left, right)) = value.split_once(':') else {
-            return Self::default();
-        };
+    pub fn parse(value: &str) -> Option<Self> {
+        let (left, right) = value.split_once(':')?;
 
-        Self {
+        Some(Self {
             left: Self::parse_side(left),
             right: Self::parse_side(right),
-        }
+        })
     }
 
     // [feat-linux] Parses one side of the layout and preserves the order of
@@ -85,18 +91,6 @@ impl LinuxWindowControlsLayout {
         side.split(',')
             .filter_map(LinuxWindowControl::from_layout_token)
             .collect()
-    }
-
-    // [feat-linux] Applies a safe fallback to the current right-side layout
-    // when the parsed value contains no recognized controls.
-    #[cfg(any(target_os = "linux", test))]
-    pub fn with_fallback(value: &str) -> Self {
-        let layout = Self::parse(value);
-        if layout.left.is_empty() && layout.right.is_empty() {
-            Self::default()
-        } else {
-            layout
-        }
     }
 }
 
@@ -329,10 +323,11 @@ impl RenderOnce for WindowControl {
 #[cfg(test)]
 mod tests {
     use super::{LinuxWindowControl, LinuxWindowControlsLayout};
+    use gpui::WindowControls;
 
     #[test]
     fn parses_buttons_on_left_and_right() {
-        let layout = LinuxWindowControlsLayout::parse("close,minimize:maximize");
+        let layout = LinuxWindowControlsLayout::parse("close,minimize:maximize").unwrap();
 
         assert_eq!(
             layout,
@@ -345,7 +340,8 @@ mod tests {
 
     #[test]
     fn ignores_unknown_tokens() {
-        let layout = LinuxWindowControlsLayout::parse("icon,close:appmenu,minimize,unknown");
+        let layout =
+            LinuxWindowControlsLayout::parse("icon,close:appmenu,minimize,unknown").unwrap();
 
         assert_eq!(
             layout,
@@ -358,7 +354,7 @@ mod tests {
 
     #[test]
     fn preserves_empty_layout() {
-        let layout = LinuxWindowControlsLayout::parse(":");
+        let layout = LinuxWindowControlsLayout::parse(":").unwrap();
 
         assert_eq!(
             layout,
@@ -373,13 +369,33 @@ mod tests {
     fn falls_back_for_missing_separator() {
         let layout = LinuxWindowControlsLayout::parse("close,minimize,maximize");
 
-        assert_eq!(layout, LinuxWindowControlsLayout::default());
+        assert_eq!(layout, None);
     }
 
     #[test]
-    fn falls_back_for_empty_recognized_layout() {
-        let layout = LinuxWindowControlsLayout::with_fallback("icon:appmenu");
+    fn preserves_empty_recognized_layout() {
+        let layout = LinuxWindowControlsLayout::parse("icon:appmenu").unwrap();
 
-        assert_eq!(layout, LinuxWindowControlsLayout::default());
+        assert_eq!(
+            layout,
+            LinuxWindowControlsLayout {
+                left: Vec::new(),
+                right: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn filters_controls_by_platform_support() {
+        let supported_controls = WindowControls {
+            fullscreen: true,
+            maximize: false,
+            minimize: true,
+            window_menu: true,
+        };
+
+        assert!(LinuxWindowControl::Close.is_supported(supported_controls));
+        assert!(LinuxWindowControl::Minimize.is_supported(supported_controls));
+        assert!(!LinuxWindowControl::Maximize.is_supported(supported_controls));
     }
 }

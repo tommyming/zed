@@ -143,7 +143,7 @@ async fn load_linux_window_controls_layout(
         return platform_linux::LinuxWindowControlsLayout::default();
     };
 
-    platform_linux::LinuxWindowControlsLayout::with_fallback(&value)
+    platform_linux::LinuxWindowControlsLayout::parse(&value).unwrap_or_default()
 }
 
 // [feat-linux] Linux Settings portal watcher. It first loads the current value,
@@ -176,7 +176,7 @@ async fn observe_linux_window_controls_layout(
     };
 
     while let Some(Ok(value)) = stream.next().await {
-        let layout = platform_linux::LinuxWindowControlsLayout::with_fallback(&value);
+        let layout = platform_linux::LinuxWindowControlsLayout::parse(&value).unwrap_or_default();
         let result = this.update(cx, |this, cx| {
             this.linux_window_controls_layout = layout;
             cx.notify();
@@ -201,6 +201,14 @@ impl Render for PlatformTitleBar {
             left: linux_window_controls_left,
             right: linux_window_controls_right,
         } = self.linux_window_controls_layout.clone();
+        let linux_window_controls_left = linux_window_controls_left
+            .into_iter()
+            .filter(|control| control.is_supported(supported_controls))
+            .collect::<Vec<_>>();
+        let linux_window_controls_right = linux_window_controls_right
+            .into_iter()
+            .filter(|control| control.is_supported(supported_controls))
+            .collect::<Vec<_>>();
 
         let is_multiworkspace_sidebar_open =
             PlatformTitleBar::is_multi_workspace_enabled(cx) && self.is_workspace_sidebar_open();
