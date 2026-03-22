@@ -1,8 +1,8 @@
 use gpui::{Action, Hsla, MouseButton, WindowControls, prelude::*, svg};
 use ui::prelude::*;
 
-// [feat-linux] Linux-only parsed representation of window controls from
-// the system `button-layout` setting. This keeps parsing and rendering
+// Linux-only parsed representation of window controls from the system
+// `button-layout` setting. This keeps parsing and rendering
 // simple by using known control types instead of raw strings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinuxWindowControl {
@@ -12,8 +12,8 @@ pub enum LinuxWindowControl {
 }
 
 impl LinuxWindowControl {
-    // [feat-linux] Parses recognized control tokens from the Linux
-    // `button-layout` value. Unknown tokens like `icon` or `appmenu`
+    // Parses recognized control tokens from the Linux `button-layout` value.
+    // Unknown tokens like `icon` or `appmenu`
     // are ignored on purpose.
     #[cfg(any(target_os = "linux", test))]
     fn from_layout_token(token: &str) -> Option<Self> {
@@ -25,8 +25,8 @@ impl LinuxWindowControl {
         }
     }
 
-    // [feat-linux] Generates stable per-control element ids so left/right
-    // rendered controls can coexist without reusing the same id.
+    // Generates stable per-control element ids so left/right rendered controls
+    // can coexist without reusing the same id.
     fn element_id(self, index: usize) -> SharedString {
         match self {
             Self::Close => format!("close-{index}").into(),
@@ -35,8 +35,8 @@ impl LinuxWindowControl {
         }
     }
 
-    // [feat-linux] Maps parsed Linux controls to the existing window control
-    // rendering types. `Maximize` becomes `Restore` when the window is already
+    // Maps parsed Linux controls to the existing window control rendering
+    // types. `Maximize` becomes `Restore` when the window is already
     // maximized so current behavior is preserved.
     fn window_control_type(self, window: &Window) -> WindowControlType {
         match self {
@@ -61,8 +61,8 @@ impl LinuxWindowControl {
     }
 }
 
-// [feat-linux] Minimal parsed layout for Linux window controls. The system
-// setting is represented as left and right control groups, so rendering can
+// Minimal parsed layout for Linux window controls. The system setting is
+// represented as left and right control groups, so rendering can
 // place controls on either side without extra layout heuristics.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinuxWindowControlsLayout {
@@ -71,8 +71,8 @@ pub struct LinuxWindowControlsLayout {
 }
 
 impl LinuxWindowControlsLayout {
-    // [feat-linux] Parses the full Linux `button-layout` string by splitting
-    // it into left/right sides around `:` and then parsing recognized tokens
+    // Parses the full Linux `button-layout` string by splitting it into
+    // left/right sides around `:` and then parsing recognized tokens
     // from each side independently.
     #[cfg(any(target_os = "linux", test))]
     pub fn parse(value: &str) -> Option<Self> {
@@ -84,8 +84,8 @@ impl LinuxWindowControlsLayout {
         })
     }
 
-    // [feat-linux] Parses one side of the layout and preserves the order of
-    // recognized controls while dropping unsupported tokens.
+    // Parses one side of the layout and preserves the order of recognized
+    // controls while dropping unsupported tokens.
     #[cfg(any(target_os = "linux", test))]
     fn parse_side(side: &str) -> Vec<LinuxWindowControl> {
         side.split(',')
@@ -115,8 +115,8 @@ impl LinuxWindowControlsLayout {
 }
 
 impl Default for LinuxWindowControlsLayout {
-    // [feat-linux] Default matches the current Linux behavior in Zed:
-    // controls on the right in minimize/maximize/close order.
+    // Default matches the current Linux behavior in Zed: controls on the
+    // right in minimize/maximize/close order.
     fn default() -> Self {
         Self {
             left: Vec::new(),
@@ -129,8 +129,8 @@ impl Default for LinuxWindowControlsLayout {
     }
 }
 
-// [feat-linux] Renders a supplied list of Linux controls instead of using a
-// single hardcoded button order. This allows title bar code to render controls
+// Renders a supplied list of Linux controls instead of using a single
+// hardcoded button order. This allows title bar code to render controls
 // on the left, right, or both sides based on the parsed system layout.
 #[derive(IntoElement)]
 pub struct LinuxWindowControls {
@@ -140,8 +140,8 @@ pub struct LinuxWindowControls {
 }
 
 impl LinuxWindowControls {
-    // [feat-linux] `controls` comes from the parsed Linux layout for one side
-    // of the title bar.
+    // `controls` comes from the parsed Linux layout for one side of the title
+    // bar.
     pub fn new(
         id: impl Into<ElementId>,
         controls: Vec<LinuxWindowControl>,
@@ -157,8 +157,8 @@ impl LinuxWindowControls {
 
 impl RenderOnce for LinuxWindowControls {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        // [feat-linux] Build controls from the parsed list in order so the
-        // rendered sequence matches the desktop setting.
+        // Build controls from the parsed list in order so the rendered
+        // sequence matches the desktop setting.
         self.controls.into_iter().enumerate().fold(
             h_flex()
                 .id(self.id)
@@ -222,25 +222,25 @@ impl WindowControlStyle {
         }
     }
 
-    #[allow(dead_code)]
+    #[allow(unused)]
     pub fn background(mut self, color: impl Into<Hsla>) -> Self {
         self.background = color.into();
         self
     }
 
-    #[allow(dead_code)]
+    #[allow(unused)]
     pub fn background_hover(mut self, color: impl Into<Hsla>) -> Self {
         self.background_hover = color.into();
         self
     }
 
-    #[allow(dead_code)]
+    #[allow(unused)]
     pub fn icon(mut self, color: impl Into<Hsla>) -> Self {
         self.icon = color.into();
         self
     }
 
-    #[allow(dead_code)]
+    #[allow(unused)]
     pub fn icon_hover(mut self, color: impl Into<Hsla>) -> Self {
         self.icon_hover = color.into();
         self
@@ -283,7 +283,7 @@ impl WindowControl {
         }
     }
 
-    #[allow(dead_code)]
+    #[allow(unused)]
     pub fn custom_style(
         id: impl Into<ElementId>,
         icon: WindowControlType,
@@ -338,8 +338,8 @@ impl RenderOnce for WindowControl {
     }
 }
 
-// [feat-linux] Parser-focused tests. These validate the Linux layout parsing
-// behavior independently from portal integration or title bar rendering.
+// Parser-focused tests. These validate the Linux layout parsing behavior
+// independently from portal integration or title bar rendering.
 #[cfg(test)]
 mod tests {
     use super::{LinuxWindowControl, LinuxWindowControlsLayout};
