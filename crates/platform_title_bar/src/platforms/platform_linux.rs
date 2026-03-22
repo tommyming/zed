@@ -92,6 +92,26 @@ impl LinuxWindowControlsLayout {
             .filter_map(LinuxWindowControl::from_layout_token)
             .collect()
     }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub fn parse_or_default(value: &str) -> Self {
+        Self::parse(value).unwrap_or_default()
+    }
+
+    pub fn filter_supported(self, supported_controls: WindowControls) -> Self {
+        Self {
+            left: self
+                .left
+                .into_iter()
+                .filter(|control| control.is_supported(supported_controls))
+                .collect(),
+            right: self
+                .right
+                .into_iter()
+                .filter(|control| control.is_supported(supported_controls))
+                .collect(),
+        }
+    }
 }
 
 impl Default for LinuxWindowControlsLayout {
@@ -386,16 +406,32 @@ mod tests {
     }
 
     #[test]
-    fn filters_controls_by_platform_support() {
+    fn falls_back_to_default_for_invalid_layout() {
+        let layout = LinuxWindowControlsLayout::parse_or_default("close,minimize,maximize");
+
+        assert_eq!(layout, LinuxWindowControlsLayout::default());
+    }
+
+    #[test]
+    fn filters_layout_by_platform_support() {
         let supported_controls = WindowControls {
             fullscreen: true,
             maximize: false,
             minimize: true,
             window_menu: true,
         };
+        let layout = LinuxWindowControlsLayout {
+            left: vec![LinuxWindowControl::Close, LinuxWindowControl::Maximize],
+            right: vec![LinuxWindowControl::Minimize],
+        }
+        .filter_supported(supported_controls);
 
-        assert!(LinuxWindowControl::Close.is_supported(supported_controls));
-        assert!(LinuxWindowControl::Minimize.is_supported(supported_controls));
-        assert!(!LinuxWindowControl::Maximize.is_supported(supported_controls));
+        assert_eq!(
+            layout,
+            LinuxWindowControlsLayout {
+                left: vec![LinuxWindowControl::Close],
+                right: vec![LinuxWindowControl::Minimize],
+            }
+        );
     }
 }
