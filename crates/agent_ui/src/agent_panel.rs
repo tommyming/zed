@@ -14,7 +14,7 @@ use agent::{ContextServerRegistry, SharedThread, ThreadStore};
 use agent_client_protocol as acp;
 use agent_servers::AgentServer;
 use collections::HashSet;
-use db::kvp::{Dismissable, KEY_VALUE_STORE};
+use db::kvp::{Dismissable, KeyValueStore};
 use itertools::Itertools;
 use project::AgentId;
 use serde::{Deserialize, Serialize};
@@ -60,7 +60,6 @@ use editor::{Anchor, AnchorRangeExt as _, Editor, EditorEvent, MultiBuffer};
 use extension::ExtensionEvents;
 use extension_host::ExtensionStore;
 use fs::Fs;
-use git::repository::validate_worktree_directory;
 use gpui::{
     Action, Animation, AnimationExt, AnyElement, App, AsyncWindowContext, ClipboardItem, Corner,
     DismissEvent, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, KeyContext, Pixels,
@@ -76,8 +75,8 @@ use search::{BufferSearchBar, buffer_search};
 use settings::{Settings, update_settings_file};
 use theme::ThemeSettings;
 use ui::{
-    Button, Callout, ContextMenu, ContextMenuEntry, DocumentationSide, KeyBinding, PopoverMenu,
-    PopoverMenuHandle, SpinnerLabel, Tab, Tooltip, prelude::*, utils::WithRemSize,
+    Button, Callout, CommonAnimationExt, ContextMenu, ContextMenuEntry, DocumentationSide,
+    KeyBinding, PopoverMenu, PopoverMenuHandle, Tab, Tooltip, prelude::*, utils::WithRemSize,
 };
 use util::{ResultExt as _, debug_panic};
 use workspace::{
@@ -95,8 +94,11 @@ const AGENT_PANEL_KEY: &str = "agent_panel";
 const RECENTLY_UPDATED_MENU_LIMIT: usize = 6;
 const DEFAULT_THREAD_TITLE: &str = "New Thread";
 
-fn read_serialized_panel(workspace_id: workspace::WorkspaceId) -> Option<SerializedAgentPanel> {
-    let scope = KEY_VALUE_STORE.scoped(AGENT_PANEL_KEY);
+fn read_serialized_panel(
+    workspace_id: workspace::WorkspaceId,
+    kvp: &KeyValueStore,
+) -> Option<SerializedAgentPanel> {
+    let scope = kvp.scoped(AGENT_PANEL_KEY);
     let key = i64::from(workspace_id).to_string();
     scope
         .read(&key)
@@ -108,8 +110,9 @@ fn read_serialized_panel(workspace_id: workspace::WorkspaceId) -> Option<Seriali
 async fn save_serialized_panel(
     workspace_id: workspace::WorkspaceId,
     panel: SerializedAgentPanel,
+    kvp: KeyValueStore,
 ) -> Result<()> {
-    let scope = KEY_VALUE_STORE.scoped(AGENT_PANEL_KEY);
+    let scope = kvp.scoped(AGENT_PANEL_KEY);
     let key = i64::from(workspace_id).to_string();
     scope.write(key, serde_json::to_string(&panel)?).await?;
     Ok(())
@@ -117,9 +120,8 @@ async fn save_serialized_panel(
 
 /// Migration: reads the original single-panel format stored under the
 /// `"agent_panel"` KVP key before per-workspace keying was introduced.
-fn read_legacy_serialized_panel() -> Option<SerializedAgentPanel> {
-    KEY_VALUE_STORE
-        .read_kvp(AGENT_PANEL_KEY)
+fn read_legacy_serialized_panel(kvp: &KeyValueStore) -> Option<SerializedAgentPanel> {
+    kvp.read_kvp(AGENT_PANEL_KEY)
         .log_err()
         .flatten()
         .and_then(|json| serde_json::from_str::<SerializedAgentPanel>(&json).log_err())
@@ -782,6 +784,7 @@ impl AgentPanel {
             }
         });
 
+        let kvp = KeyValueStore::global(cx);
         self.pending_serialization = Some(cx.background_spawn(async move {
             save_serialized_panel(
                 workspace_id,
@@ -791,6 +794,7 @@ impl AgentPanel {
                     last_active_thread,
                     start_thread_in,
                 },
+                kvp,
             )
             .await?;
             anyhow::Ok(())
@@ -803,6 +807,7 @@ impl AgentPanel {
         mut cx: AsyncWindowContext,
     ) -> Task<Result<Entity<Self>>> {
         let prompt_store = cx.update(|_window, cx| PromptStore::global(cx));
+        let kvp = cx.update(|_window, cx| KeyValueStore::global(cx)).ok();
         cx.spawn(async move |cx| {
             let prompt_store = match prompt_store {
                 Ok(prompt_store) => prompt_store.await.ok(),
@@ -815,9 +820,11 @@ impl AgentPanel {
 
             let serialized_panel = cx
                 .background_spawn(async move {
-                    workspace_id
-                        .and_then(read_serialized_panel)
-                        .or_else(read_legacy_serialized_panel)
+                    kvp.and_then(|kvp| {
+                        workspace_id
+                            .and_then(|id| read_serialized_panel(id, &kvp))
+                            .or_else(|| read_legacy_serialized_panel(&kvp))
+                    })
                 })
                 .await;
 
@@ -1089,7 +1096,7 @@ impl AgentPanel {
             _worktree_creation_task: None,
             show_trust_workspace_message: false,
             last_configuration_error_telemetry: None,
-            on_boarding_upsell_dismissed: AtomicBool::new(OnboardingUpsell::dismissed()),
+            on_boarding_upsell_dismissed: AtomicBool::new(OnboardingUpsell::dismissed(cx)),
             _active_view_observation: None,
         };
 
@@ -1308,16 +1315,17 @@ impl AgentPanel {
         }
 
         let thread_store = self.thread_store.clone();
+        let kvp = KeyValueStore::global(cx);
 
         if let Some(agent) = agent_choice {
             cx.background_spawn({
                 let agent = agent.clone();
+                let kvp = kvp;
                 async move {
                     if let Some(serialized) =
                         serde_json::to_string(&LastUsedExternalAgent { agent }).log_err()
                     {
-                        KEY_VALUE_STORE
-                            .write_kvp(LAST_USED_EXTERNAL_AGENT_KEY.to_string(), serialized)
+                        kvp.write_kvp(LAST_USED_EXTERNAL_AGENT_KEY.to_string(), serialized)
                             .await
                             .log_err();
                     }
@@ -1344,17 +1352,15 @@ impl AgentPanel {
                 let ext_agent = if is_via_collab {
                     Agent::NativeAgent
                 } else {
-                    cx.background_spawn(async move {
-                        KEY_VALUE_STORE.read_kvp(LAST_USED_EXTERNAL_AGENT_KEY)
-                    })
-                    .await
-                    .log_err()
-                    .flatten()
-                    .and_then(|value| {
-                        serde_json::from_str::<LastUsedExternalAgent>(&value).log_err()
-                    })
-                    .map(|agent| agent.agent)
-                    .unwrap_or(Agent::NativeAgent)
+                    cx.background_spawn(async move { kvp.read_kvp(LAST_USED_EXTERNAL_AGENT_KEY) })
+                        .await
+                        .log_err()
+                        .flatten()
+                        .and_then(|value| {
+                            serde_json::from_str::<LastUsedExternalAgent>(&value).log_err()
+                        })
+                        .map(|agent| agent.agent)
+                        .unwrap_or(Agent::NativeAgent)
                 };
 
                 let server = ext_agent.server(fs, thread_store);
@@ -1972,13 +1978,13 @@ impl AgentPanel {
         let mut views = Vec::new();
 
         if let Some(server_view) = self.active_conversation_view() {
-            if let Some(thread_view) = server_view.read(cx).parent_thread(cx) {
+            if let Some(thread_view) = server_view.read(cx).root_thread(cx) {
                 views.push(thread_view);
             }
         }
 
         for server_view in self.background_threads.values() {
-            if let Some(thread_view) = server_view.read(cx).parent_thread(cx) {
+            if let Some(thread_view) = server_view.read(cx).root_thread(cx) {
                 views.push(thread_view);
             }
         }
@@ -1991,22 +1997,46 @@ impl AgentPanel {
             return;
         };
 
-        let Some(thread_view) = conversation_view.read(cx).parent_thread(cx) else {
+        let Some(thread_view) = conversation_view.read(cx).root_thread(cx) else {
             return;
         };
-
-        let thread = &thread_view.read(cx).thread;
-        let (status, session_id) = {
-            let thread = thread.read(cx);
-            (thread.status(), thread.session_id().clone())
-        };
-
-        if status != ThreadStatus::Generating {
-            return;
-        }
 
         self.background_threads
-            .insert(session_id, conversation_view);
+            .insert(thread_view.read(cx).id.clone(), conversation_view);
+        self.cleanup_background_threads(cx);
+    }
+
+    /// We keep threads that are:
+    /// - Still running
+    /// - Do not support reloading the full session
+    /// - Have had the most recent events (up to 5 idle threads)
+    fn cleanup_background_threads(&mut self, cx: &App) {
+        let mut potential_removals = self
+            .background_threads
+            .iter()
+            .filter(|(_id, view)| {
+                let Some(thread_view) = view.read(cx).root_thread(cx) else {
+                    return true;
+                };
+                let thread = thread_view.read(cx).thread.read(cx);
+                thread.connection().supports_load_session() && thread.status() == ThreadStatus::Idle
+            })
+            .collect::<Vec<_>>();
+
+        const MAX_IDLE_BACKGROUND_THREADS: usize = 5;
+
+        potential_removals.sort_unstable_by_key(|(_, view)| view.read(cx).updated_at(cx));
+        let n = potential_removals
+            .len()
+            .saturating_sub(MAX_IDLE_BACKGROUND_THREADS);
+        let to_remove = potential_removals
+            .into_iter()
+            .map(|(id, _)| id.clone())
+            .take(n)
+            .collect::<Vec<_>>();
+        for id in to_remove {
+            self.background_threads.remove(&id);
+        }
     }
 
     pub(crate) fn active_native_agent_thread(&self, cx: &App) -> Option<Entity<agent::Thread>> {
@@ -2272,7 +2302,13 @@ impl AgentPanel {
         let default = AgentSettings::get_global(cx).new_thread_location;
         let start_thread_in = match default {
             NewThreadLocation::LocalProject => StartThreadIn::LocalProject,
-            NewThreadLocation::NewWorktree => StartThreadIn::NewWorktree,
+            NewThreadLocation::NewWorktree => {
+                if self.project_has_git_repository(cx) {
+                    StartThreadIn::NewWorktree
+                } else {
+                    StartThreadIn::LocalProject
+                }
+            }
         };
         if self.start_thread_in != start_thread_in {
             self.start_thread_in = start_thread_in;
@@ -2505,6 +2541,10 @@ impl AgentPanel {
             .is_some_and(|thread| !thread.read(cx).entries().is_empty())
     }
 
+    pub fn active_thread_is_draft(&self, cx: &App) -> bool {
+        self.active_conversation().is_some() && !self.active_thread_has_messages(cx)
+    }
+
     fn handle_first_send_requested(
         &mut self,
         thread_view: Entity<ThreadView>,
@@ -2606,11 +2646,10 @@ impl AgentPanel {
 
         for repo in git_repos {
             let (work_dir, new_path, receiver) = repo.update(cx, |repo, _cx| {
-                let original_repo = repo.original_repo_abs_path.clone();
-                let directory =
-                    validate_worktree_directory(&original_repo, worktree_directory_setting)?;
-                let new_path = directory.join(branch_name);
-                let receiver = repo.create_worktree(branch_name.to_string(), directory, None);
+                let new_path =
+                    repo.path_for_new_linked_worktree(branch_name, worktree_directory_setting)?;
+                let receiver =
+                    repo.create_worktree(branch_name.to_string(), new_path.clone(), None);
                 let work_dir = repo.work_directory_abs_path.clone();
                 anyhow::Ok((work_dir, new_path, receiver))
             })?;
@@ -3021,8 +3060,17 @@ impl AgentPanel {
             multi_workspace.activate(new_workspace.clone(), cx);
         })?;
 
-        this.update_in(cx, |this, _window, cx| {
+        this.update_in(cx, |this, window, cx| {
             this.worktree_creation_status = None;
+
+            if let Some(thread_view) = this.active_thread_view(cx) {
+                thread_view.update(cx, |thread_view, cx| {
+                    thread_view
+                        .message_editor
+                        .update(cx, |editor, cx| editor.clear(window, cx));
+                });
+            }
+
             cx.notify();
         })?;
 
@@ -3168,12 +3216,12 @@ impl AgentPanel {
             ActiveView::AgentThread { conversation_view } => {
                 let server_view_ref = conversation_view.read(cx);
                 let is_generating_title = server_view_ref.as_native_thread(cx).is_some()
-                    && server_view_ref.parent_thread(cx).map_or(false, |tv| {
+                    && server_view_ref.root_thread(cx).map_or(false, |tv| {
                         tv.read(cx).thread.read(cx).has_provisional_title()
                     });
 
                 if let Some(title_editor) = server_view_ref
-                    .parent_thread(cx)
+                    .root_thread(cx)
                     .map(|r| r.read(cx).title_editor.clone())
                 {
                     if is_generating_title {
@@ -3650,6 +3698,7 @@ impl AgentPanel {
 
     fn render_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let agent_server_store = self.project.read(cx).agent_server_store().clone();
+        let has_visible_worktrees = self.project.read(cx).visible_worktrees(cx).next().is_some();
         let focus_handle = self.focus_handle(cx);
 
         let (selected_agent_custom_icon, selected_agent_label) =
@@ -4010,7 +4059,10 @@ impl AgentPanel {
                         .gap(DynamicSpacing::Base04.rems(cx))
                         .pl(DynamicSpacing::Base04.rems(cx))
                         .child(agent_selector_menu)
-                        .child(self.render_start_thread_in_selector(cx)),
+                        .when(
+                            has_visible_worktrees && self.project_has_git_repository(cx),
+                            |this| this.child(self.render_start_thread_in_selector(cx)),
+                        ),
                 )
                 .child(
                     h_flex()
@@ -4089,48 +4141,38 @@ impl AgentPanel {
         match status {
             WorktreeCreationStatus::Creating => Some(
                 h_flex()
+                    .absolute()
+                    .bottom_12()
                     .w_full()
-                    .px(DynamicSpacing::Base06.rems(cx))
-                    .py(DynamicSpacing::Base02.rems(cx))
-                    .gap_2()
-                    .bg(cx.theme().colors().surface_background)
-                    .border_b_1()
-                    .border_color(cx.theme().colors().border)
-                    .child(SpinnerLabel::new().size(LabelSize::Small))
+                    .p_2()
+                    .gap_1()
+                    .justify_center()
+                    .bg(cx.theme().colors().editor_background)
                     .child(
-                        Label::new("Creating worktree…")
+                        Icon::new(IconName::LoadCircle)
+                            .size(IconSize::Small)
+                            .color(Color::Muted)
+                            .with_rotate_animation(3),
+                    )
+                    .child(
+                        Label::new("Creating Worktree…")
                             .color(Color::Muted)
                             .size(LabelSize::Small),
                     )
                     .into_any_element(),
             ),
             WorktreeCreationStatus::Error(message) => Some(
-                h_flex()
-                    .w_full()
-                    .px(DynamicSpacing::Base06.rems(cx))
-                    .py(DynamicSpacing::Base02.rems(cx))
-                    .gap_2()
-                    .bg(cx.theme().colors().surface_background)
-                    .border_b_1()
-                    .border_color(cx.theme().colors().border)
-                    .child(
-                        Icon::new(IconName::Warning)
-                            .size(IconSize::Small)
-                            .color(Color::Warning),
-                    )
-                    .child(
-                        Label::new(message.clone())
-                            .color(Color::Warning)
-                            .size(LabelSize::Small)
-                            .truncate(),
-                    )
+                Callout::new()
+                    .icon(IconName::Warning)
+                    .severity(Severity::Warning)
+                    .title(message.clone())
                     .into_any_element(),
             ),
         }
     }
 
     fn should_render_trial_end_upsell(&self, cx: &mut Context<Self>) -> bool {
-        if TrialEndUpsell::dismissed() {
+        if TrialEndUpsell::dismissed(cx) {
             return false;
         }
 
@@ -4566,7 +4608,6 @@ impl Render for AgentPanel {
                 }
             }))
             .child(self.render_toolbar(window, cx))
-            .children(self.render_worktree_creation_status(cx))
             .children(self.render_workspace_trust_message(cx))
             .children(self.render_onboarding(window, cx))
             .map(|parent| {
@@ -4623,6 +4664,7 @@ impl Render for AgentPanel {
                     ActiveView::Configuration => parent.children(self.configuration.clone()),
                 }
             })
+            .children(self.render_worktree_creation_status(cx))
             .children(self.render_trial_end_upsell(window, cx));
 
         match self.active_view.which_font_size_used() {
@@ -4922,7 +4964,10 @@ impl AgentPanel {
 mod tests {
     use super::*;
     use crate::conversation_view::tests::{StubAgentServer, init_test};
-    use crate::test_support::{active_session_id, open_thread_with_connection, send_message};
+    use crate::test_support::{
+        active_session_id, open_thread_with_connection, open_thread_with_custom_connection,
+        send_message,
+    };
     use acp_thread::{StubAgentConnection, ThreadStatus};
     use agent_servers::CODEX_ID;
     use assistant_text_thread::TextThreadStore;
@@ -4931,6 +4976,7 @@ mod tests {
     use gpui::{TestAppContext, VisualTestContext};
     use project::Project;
     use serde_json::json;
+    use std::time::Instant;
     use workspace::MultiWorkspace;
 
     #[gpui::test]
@@ -5398,6 +5444,41 @@ mod tests {
         assert!(uri.contains("utils.rs"), "URI should encode the file path");
     }
 
+    fn open_generating_thread_with_loadable_connection(
+        panel: &Entity<AgentPanel>,
+        connection: &StubAgentConnection,
+        cx: &mut VisualTestContext,
+    ) -> acp::SessionId {
+        open_thread_with_custom_connection(panel, connection.clone(), cx);
+        let session_id = active_session_id(panel, cx);
+        send_message(panel, cx);
+        cx.update(|_, cx| {
+            connection.send_update(
+                session_id.clone(),
+                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new("done".into())),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        session_id
+    }
+
+    fn open_idle_thread_with_non_loadable_connection(
+        panel: &Entity<AgentPanel>,
+        connection: &StubAgentConnection,
+        cx: &mut VisualTestContext,
+    ) -> acp::SessionId {
+        open_thread_with_custom_connection(panel, connection.clone(), cx);
+        let session_id = active_session_id(panel, cx);
+
+        connection.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
+            acp::ContentChunk::new("done".into()),
+        )]);
+        send_message(panel, cx);
+
+        session_id
+    }
+
     async fn setup_panel(cx: &mut TestAppContext) -> (Entity<AgentPanel>, VisualTestContext) {
         init_test(cx);
         cx.update(|cx| {
@@ -5471,7 +5552,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_idle_thread_dropped_when_navigating_away(cx: &mut TestAppContext) {
+    async fn test_idle_non_loadable_thread_retained_when_navigating_away(cx: &mut TestAppContext) {
         let (panel, mut cx) = setup_panel(cx).await;
 
         let connection_a = StubAgentConnection::new();
@@ -5484,6 +5565,7 @@ mod tests {
         let weak_view_a = panel.read_with(&cx, |panel, _cx| {
             panel.active_conversation().unwrap().downgrade()
         });
+        let session_id_a = active_session_id(&panel, &cx);
 
         // Thread A should be idle (auto-completed via set_next_prompt_updates).
         panel.read_with(&cx, |panel, cx| {
@@ -5491,21 +5573,25 @@ mod tests {
             assert_eq!(thread.read(cx).status(), ThreadStatus::Idle);
         });
 
-        // Open a new thread B — thread A should NOT be retained.
+        // Open a new thread B — thread A should be retained because it is not loadable.
         let connection_b = StubAgentConnection::new();
         open_thread_with_connection(&panel, connection_b, &mut cx);
 
         panel.read_with(&cx, |panel, _cx| {
+            assert_eq!(
+                panel.background_threads.len(),
+                1,
+                "Idle non-loadable thread A should be retained in background_views"
+            );
             assert!(
-                panel.background_threads.is_empty(),
-                "Idle thread A should not be retained in background_views"
+                panel.background_threads.contains_key(&session_id_a),
+                "Background view should be keyed by thread A's session ID"
             );
         });
 
-        // Verify the old ConnectionView entity was dropped (no strong references remain).
         assert!(
-            weak_view_a.upgrade().is_none(),
-            "Idle ConnectionView should have been dropped"
+            weak_view_a.upgrade().is_some(),
+            "Idle non-loadable ConnectionView should still be retained"
         );
     }
 
@@ -5566,8 +5652,152 @@ mod tests {
                 "Promoted thread A should no longer be in background_views"
             );
             assert!(
-                !panel.background_threads.contains_key(&session_id_b),
-                "Thread B (idle) should not have been retained in background_views"
+                panel.background_threads.contains_key(&session_id_b),
+                "Thread B (idle, non-loadable) should remain retained in background_views"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_cleanup_background_threads_keeps_five_most_recent_idle_loadable_threads(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        let connection = StubAgentConnection::new()
+            .with_supports_load_session(true)
+            .with_agent_id("loadable-stub".into())
+            .with_telemetry_id("loadable-stub".into());
+        let mut session_ids = Vec::new();
+
+        for _ in 0..7 {
+            session_ids.push(open_generating_thread_with_loadable_connection(
+                &panel,
+                &connection,
+                &mut cx,
+            ));
+        }
+
+        let base_time = Instant::now();
+
+        for session_id in session_ids.iter().take(6) {
+            connection.end_turn(session_id.clone(), acp::StopReason::EndTurn);
+        }
+        cx.run_until_parked();
+
+        panel.update(&mut cx, |panel, cx| {
+            for (index, session_id) in session_ids.iter().take(6).enumerate() {
+                let conversation_view = panel
+                    .background_threads
+                    .get(session_id)
+                    .expect("background thread should exist")
+                    .clone();
+                conversation_view.update(cx, |view, cx| {
+                    view.set_updated_at(base_time + Duration::from_secs(index as u64), cx);
+                });
+            }
+            panel.cleanup_background_threads(cx);
+        });
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert_eq!(
+                panel.background_threads.len(),
+                5,
+                "cleanup should keep at most five idle loadable background threads"
+            );
+            assert!(
+                !panel.background_threads.contains_key(&session_ids[0]),
+                "oldest idle loadable background thread should be removed"
+            );
+            for session_id in &session_ids[1..6] {
+                assert!(
+                    panel.background_threads.contains_key(session_id),
+                    "more recent idle loadable background threads should be retained"
+                );
+            }
+            assert!(
+                !panel.background_threads.contains_key(&session_ids[6]),
+                "the active thread should not also be stored as a background thread"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_cleanup_background_threads_preserves_idle_non_loadable_threads(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut cx) = setup_panel(cx).await;
+
+        let non_loadable_connection = StubAgentConnection::new();
+        let non_loadable_session_id = open_idle_thread_with_non_loadable_connection(
+            &panel,
+            &non_loadable_connection,
+            &mut cx,
+        );
+
+        let loadable_connection = StubAgentConnection::new()
+            .with_supports_load_session(true)
+            .with_agent_id("loadable-stub".into())
+            .with_telemetry_id("loadable-stub".into());
+        let mut loadable_session_ids = Vec::new();
+
+        for _ in 0..7 {
+            loadable_session_ids.push(open_generating_thread_with_loadable_connection(
+                &panel,
+                &loadable_connection,
+                &mut cx,
+            ));
+        }
+
+        let base_time = Instant::now();
+
+        for session_id in loadable_session_ids.iter().take(6) {
+            loadable_connection.end_turn(session_id.clone(), acp::StopReason::EndTurn);
+        }
+        cx.run_until_parked();
+
+        panel.update(&mut cx, |panel, cx| {
+            for (index, session_id) in loadable_session_ids.iter().take(6).enumerate() {
+                let conversation_view = panel
+                    .background_threads
+                    .get(session_id)
+                    .expect("background thread should exist")
+                    .clone();
+                conversation_view.update(cx, |view, cx| {
+                    view.set_updated_at(base_time + Duration::from_secs(index as u64), cx);
+                });
+            }
+            panel.cleanup_background_threads(cx);
+        });
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert_eq!(
+                panel.background_threads.len(),
+                6,
+                "cleanup should keep the non-loadable idle thread in addition to five loadable ones"
+            );
+            assert!(
+                panel
+                    .background_threads
+                    .contains_key(&non_loadable_session_id),
+                "idle non-loadable background threads should not be cleanup candidates"
+            );
+            assert!(
+                !panel
+                    .background_threads
+                    .contains_key(&loadable_session_ids[0]),
+                "oldest idle loadable background thread should still be removed"
+            );
+            for session_id in &loadable_session_ids[1..6] {
+                assert!(
+                    panel.background_threads.contains_key(session_id),
+                    "more recent idle loadable background threads should be retained"
+                );
+            }
+            assert!(
+                !panel
+                    .background_threads
+                    .contains_key(&loadable_session_ids[6]),
+                "the active loadable thread should not also be stored as a background thread"
             );
         });
     }

@@ -14,8 +14,8 @@ use language_model::{
 };
 use menu;
 use open_ai::responses::{
-    ResponseFunctionCallItem, ResponseFunctionCallOutputItem, ResponseInputContent,
-    ResponseInputItem, ResponseMessageItem,
+    ResponseFunctionCallItem, ResponseFunctionCallOutputContent, ResponseFunctionCallOutputItem,
+    ResponseInputContent, ResponseInputItem, ResponseMessageItem,
 };
 use open_ai::{
     ImageUrl, Model, OPEN_AI_API_URL, ReasoningEffort, ResponseStreamEvent,
@@ -33,7 +33,7 @@ use ui::{ButtonLink, ConfiguredApiCard, List, ListBulletItem, prelude::*};
 use ui_input::InputField;
 use util::ResultExt;
 
-use crate::provider::util::parse_tool_arguments;
+use crate::provider::util::{fix_streamed_json, parse_tool_arguments};
 
 const PROVIDER_ID: LanguageModelProviderId = language_model::OPEN_AI_PROVIDER_ID;
 const PROVIDER_NAME: LanguageModelProviderName = language_model::OPEN_AI_PROVIDER_NAME;
@@ -647,8 +647,16 @@ fn append_message_to_response_items(
                     ResponseFunctionCallOutputItem {
                         call_id: tool_result.tool_use_id.to_string(),
                         output: match tool_result.content {
-                            LanguageModelToolResultContent::Text(text) => text.to_string(),
-                            LanguageModelToolResultContent::Image(image) => image.to_base64_url(),
+                            LanguageModelToolResultContent::Text(text) => {
+                                ResponseFunctionCallOutputContent::Text(text.to_string())
+                            }
+                            LanguageModelToolResultContent::Image(image) => {
+                                ResponseFunctionCallOutputContent::List(vec![
+                                    ResponseInputContent::Image {
+                                        image_url: image.to_base64_url(),
+                                    },
+                                ])
+                            }
                         },
                     },
                 ));
@@ -828,7 +836,7 @@ impl OpenAiEventMapper {
 
                     if !entry.id.is_empty() && !entry.name.is_empty() {
                         if let Ok(input) = serde_json::from_str::<serde_json::Value>(
-                            &partial_json_fixer::fix_json(&entry.arguments),
+                            &fix_streamed_json(&entry.arguments),
                         ) {
                             events.push(Ok(LanguageModelCompletionEvent::ToolUse(
                                 LanguageModelToolUse {
@@ -983,7 +991,7 @@ impl OpenAiResponseEventMapper {
                 if let Some(entry) = self.function_calls_by_item.get_mut(&item_id) {
                     entry.arguments.push_str(&delta);
                     if let Ok(input) = serde_json::from_str::<serde_json::Value>(
-                        &partial_json_fixer::fix_json(&entry.arguments),
+                        &fix_streamed_json(&entry.arguments),
                     ) {
                         return vec![Ok(LanguageModelCompletionEvent::ToolUse(
                             LanguageModelToolUse {

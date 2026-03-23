@@ -493,8 +493,12 @@ impl NativeAgent {
                 })??
                 .await;
             this.update(cx, |this, cx| {
-                if let Some(state) = this.projects.get_mut(&project_id) {
-                    state.project_context = cx.new(|_| project_context);
+                if let Some(state) = this.projects.get(&project_id) {
+                    state
+                        .project_context
+                        .update(cx, |current_project_context, _cx| {
+                            *current_project_context = project_context;
+                        });
                 }
             })?;
         }
@@ -723,7 +727,7 @@ impl NativeAgent {
     fn handle_models_updated_event(
         &mut self,
         _registry: Entity<LanguageModelRegistry>,
-        _event: &language_model::Event,
+        event: &language_model::Event,
         cx: &mut Context<Self>,
     ) {
         self.models.refresh_list(cx);
@@ -740,7 +744,13 @@ impl NativeAgent {
                     thread.set_model(model, cx);
                     cx.notify();
                 }
-                thread.set_summarization_model(summarization_model.clone(), cx);
+                if let Some(model) = summarization_model.clone() {
+                    if thread.summarization_model().is_none()
+                        || matches!(event, language_model::Event::ThreadSummaryModelChanged)
+                    {
+                        thread.set_summarization_model(Some(model), cx);
+                    }
+                }
             });
         }
     }
@@ -1194,12 +1204,11 @@ impl NativeAgentConnection {
                                     thread.request_tool_call_authorization(tool_call, options, cx)
                                 })??;
                                 cx.background_spawn(async move {
-                                    if let acp::RequestPermissionOutcome::Selected(
-                                        acp::SelectedPermissionOutcome { option_id, .. },
-                                    ) = outcome_task.await
+                                    if let acp_thread::RequestPermissionOutcome::Selected(outcome) =
+                                        outcome_task.await
                                     {
                                         response
-                                            .send(option_id)
+                                            .send(outcome)
                                             .map(|_| anyhow!("authorization receiver was dropped"))
                                             .log_err();
                                     }
@@ -1215,6 +1224,9 @@ impl NativeAgentConnection {
                                 acp_thread.update(cx, |thread, cx| {
                                     thread.update_tool_call(update, cx)
                                 })??;
+                            }
+                            ThreadEvent::Plan(plan) => {
+                                acp_thread.update(cx, |thread, cx| thread.update_plan(plan, cx))?;
                             }
                             ThreadEvent::SubagentSpawned(session_id) => {
                                 acp_thread.update(cx, |thread, cx| {
@@ -2131,10 +2143,15 @@ mod internal_tests {
             .unwrap();
         cx.run_until_parked();
 
+        let thread = agent.read_with(cx, |agent, _cx| {
+            agent.sessions.values().next().unwrap().thread.clone()
+        });
+
         agent.read_with(cx, |agent, cx| {
             let project_id = project.entity_id();
             let state = agent.projects.get(&project_id).unwrap();
-            assert_eq!(state.project_context.read(cx).worktrees, vec![])
+            assert_eq!(state.project_context.read(cx).worktrees, vec![]);
+            assert_eq!(thread.read(cx).project_context().read(cx).worktrees, vec![]);
         });
 
         let worktree = project
@@ -2145,14 +2162,16 @@ mod internal_tests {
         agent.read_with(cx, |agent, cx| {
             let project_id = project.entity_id();
             let state = agent.projects.get(&project_id).unwrap();
+            let expected_worktrees = vec![WorktreeContext {
+                root_name: "a".into(),
+                abs_path: Path::new("/a").into(),
+                rules_file: None,
+            }];
+            assert_eq!(state.project_context.read(cx).worktrees, expected_worktrees);
             assert_eq!(
-                state.project_context.read(cx).worktrees,
-                vec![WorktreeContext {
-                    root_name: "a".into(),
-                    abs_path: Path::new("/a").into(),
-                    rules_file: None
-                }]
-            )
+                thread.read(cx).project_context().read(cx).worktrees,
+                expected_worktrees
+            );
         });
 
         // Creating `/a/.rules` updates the project context.
@@ -2165,18 +2184,20 @@ mod internal_tests {
                 .read(cx)
                 .entry_for_path(rel_path(".rules"))
                 .unwrap();
+            let expected_worktrees = vec![WorktreeContext {
+                root_name: "a".into(),
+                abs_path: Path::new("/a").into(),
+                rules_file: Some(RulesFileContext {
+                    path_in_worktree: rel_path(".rules").into(),
+                    text: "".into(),
+                    project_entry_id: rules_entry.id.to_usize(),
+                }),
+            }];
+            assert_eq!(state.project_context.read(cx).worktrees, expected_worktrees);
             assert_eq!(
-                state.project_context.read(cx).worktrees,
-                vec![WorktreeContext {
-                    root_name: "a".into(),
-                    abs_path: Path::new("/a").into(),
-                    rules_file: Some(RulesFileContext {
-                        path_in_worktree: rel_path(".rules").into(),
-                        text: "".into(),
-                        project_entry_id: rules_entry.id.to_usize()
-                    })
-                }]
-            )
+                thread.read(cx).project_context().read(cx).worktrees,
+                expected_worktrees
+            );
         });
     }
 
@@ -2438,6 +2459,61 @@ mod internal_tests {
                     "select_model should disable thinking when model does not support it"
                 );
             });
+        });
+    }
+
+    #[gpui::test]
+    async fn test_summarization_model_survives_transient_registry_clearing(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/", json!({ "a": {} })).await;
+        let project = Project::test(fs.clone(), [], cx).await;
+
+        let thread_store = cx.new(|cx| ThreadStore::new(cx));
+        let agent =
+            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), None, fs.clone(), cx));
+        let connection = Rc::new(NativeAgentConnection(agent.clone()));
+
+        let acp_thread = cx
+            .update(|cx| {
+                connection.clone().new_session(
+                    project.clone(),
+                    PathList::new(&[Path::new("/a")]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+
+        let thread = agent.read_with(cx, |agent, _| {
+            agent.sessions.get(&session_id).unwrap().thread.clone()
+        });
+
+        thread.read_with(cx, |thread, _| {
+            assert!(
+                thread.summarization_model().is_some(),
+                "session should have a summarization model from the test registry"
+            );
+        });
+
+        // Simulate what happens during a provider blip:
+        // update_active_language_model_from_settings calls set_default_model(None)
+        // when it can't resolve the model, clearing all fallbacks.
+        cx.update(|cx| {
+            LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+                registry.set_default_model(None, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        thread.read_with(cx, |thread, _| {
+            assert!(
+                thread.summarization_model().is_some(),
+                "summarization model should survive a transient default model clearing"
+            );
         });
     }
 

@@ -111,19 +111,6 @@ impl PlatformTitleBar {
         cx.notify();
     }
 
-    pub fn sidebar_has_notifications(&self) -> bool {
-        self.sidebar_has_notifications
-    }
-
-    pub fn set_sidebar_has_notifications(
-        &mut self,
-        has_notifications: bool,
-        cx: &mut Context<Self>,
-    ) {
-        self.sidebar_has_notifications = has_notifications;
-        cx.notify();
-    }
-
     pub fn is_multi_workspace_enabled(cx: &App) -> bool {
         cx.has_flag::<AgentV2FeatureFlag>() && !DisableAiSettings::get_global(cx).disable_ai
     }
