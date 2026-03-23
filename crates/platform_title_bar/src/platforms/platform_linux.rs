@@ -211,6 +211,10 @@ pub struct WindowControlStyle {
 }
 
 impl WindowControlStyle {
+    /// Returns the icon name for the window control type.
+    ///
+    /// Will take a [PlatformStyle] in the future to return a different
+    /// icon name based on the platform.
     pub fn default(cx: &mut App) -> Self {
         let colors = cx.theme().colors();
 
@@ -223,24 +227,28 @@ impl WindowControlStyle {
     }
 
     #[allow(unused)]
+    /// Sets the background color of the control.
     pub fn background(mut self, color: impl Into<Hsla>) -> Self {
         self.background = color.into();
         self
     }
 
     #[allow(unused)]
+    /// Sets the background color of the control when hovered.
     pub fn background_hover(mut self, color: impl Into<Hsla>) -> Self {
         self.background_hover = color.into();
         self
     }
 
     #[allow(unused)]
+    /// Sets the color of the icon.
     pub fn icon(mut self, color: impl Into<Hsla>) -> Self {
         self.icon = color.into();
         self
     }
 
     #[allow(unused)]
+    /// Sets the color of the icon when hovered.
     pub fn icon_hover(mut self, color: impl Into<Hsla>) -> Self {
         self.icon_hover = color.into();
         self
