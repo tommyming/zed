@@ -71,9 +71,10 @@ impl PlatformTitleBar {
         // `button-layout` changes while the app is running.
         #[cfg(target_os = "linux")]
         if platform_style == PlatformStyle::Linux {
-            this._linux_window_controls_task = Some(
-                cx.spawn(async move |this, cx| observe_linux_window_controls_layout(this, cx)),
-            );
+            this._linux_window_controls_task =
+                Some(cx.spawn(async move |this, cx| {
+                    observe_linux_window_controls_layout(this, cx).await
+                }));
         }
 
         this
