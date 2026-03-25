@@ -1,4 +1,6 @@
-use gpui::{Action, Hsla, MouseButton, WindowControls, prelude::*, svg};
+use gpui::{
+    Action, AnyElement, Hsla, MAX_BUTTONS_PER_SIDE, MouseButton, WindowButton, prelude::*, svg,
+};
 use ui::prelude::*;
 
 // Linux-only parsed representation of window controls from the system
@@ -134,52 +136,79 @@ impl Default for LinuxWindowControlsLayout {
 // on the left, right, or both sides based on the parsed system layout.
 #[derive(IntoElement)]
 pub struct LinuxWindowControls {
-    id: ElementId,
-    controls: Vec<LinuxWindowControl>,
-    close_window_action: Box<dyn Action>,
+    id: &'static str,
+    buttons: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
+    close_action: Box<dyn Action>,
 }
 
 impl LinuxWindowControls {
-    // `controls` comes from the parsed Linux layout for one side of the title
-    // bar.
     pub fn new(
-        id: impl Into<ElementId>,
-        controls: Vec<LinuxWindowControl>,
-        close_window_action: Box<dyn Action>,
+        id: &'static str,
+        buttons: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
+        close_action: Box<dyn Action>,
     ) -> Self {
         Self {
-            id: id.into(),
-            controls,
-            close_window_action,
+            id,
+            buttons,
+            close_action,
         }
     }
 }
 
 impl RenderOnce for LinuxWindowControls {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        // Build controls from the parsed list in order so the rendered
-        // sequence matches the desktop setting.
-        self.controls.into_iter().enumerate().fold(
-            h_flex()
-                .id(self.id)
-                .px_3()
-                .gap_3()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
-            |controls, (index, control)| {
-                let window_control_type = control.window_control_type(window);
-                let element_id = control.element_id(index);
+        let is_maximized = window.is_maximized();
+        let supported_controls = window.window_controls();
+        let button_elements: Vec<AnyElement> = self
+            .buttons
+            .iter()
+            .filter_map(|b| *b)
+            .filter(|button| match button {
+                WindowButton::Minimize => supported_controls.minimize,
+                WindowButton::Maximize => supported_controls.maximize,
+                WindowButton::Close => true,
+            })
+            .map(|button| {
+                create_window_button(button, button.id(), is_maximized, &*self.close_action, cx)
+            })
+            .collect();
 
-                match window_control_type {
-                    WindowControlType::Close => controls.child(WindowControl::new_close(
-                        element_id,
-                        window_control_type,
-                        self.close_window_action.boxed_clone(),
-                        cx,
-                    )),
-                    _ => controls.child(WindowControl::new(element_id, window_control_type, cx)),
-                }
+        h_flex()
+            .id(self.id)
+            .when(!button_elements.is_empty(), |el| {
+                el.gap_3()
+                    .px_3()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .children(button_elements)
+            })
+    }
+}
+
+fn create_window_button(
+    button: WindowButton,
+    id: &'static str,
+    is_maximized: bool,
+    close_action: &dyn Action,
+    cx: &mut App,
+) -> AnyElement {
+    match button {
+        WindowButton::Minimize => {
+            WindowControl::new(id, WindowControlType::Minimize, cx).into_any_element()
+        }
+        WindowButton::Maximize => WindowControl::new(
+            id,
+            if is_maximized {
+                WindowControlType::Restore
+            } else {
+                WindowControlType::Maximize
             },
+            cx,
         )
+        .into_any_element(),
+        WindowButton::Close => {
+            WindowControl::new_close(id, WindowControlType::Close, close_action.boxed_clone(), cx)
+                .into_any_element()
+        }
     }
 }
 
